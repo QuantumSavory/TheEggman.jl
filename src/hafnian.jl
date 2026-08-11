@@ -787,13 +787,20 @@ function _expanded_indices(rpt::AbstractVector{<:Integer}, total::Int)
     return idx
 end
 
-# Run whichever direct (non-sieve) kernel was selected.
-function _haf_direct_method(::Type{T}, method::Symbol, A::AbstractMatrix, idx::Vector{Int}) where {T}
+# Run whichever direct (non-sieve) kernel was selected. Only the DP uses `nthreads`; the unrolled
+# kernels are a single straight-line expression with nothing to spread.
+function _haf_direct_method(
+    ::Type{T},
+    method::Symbol,
+    A::AbstractMatrix,
+    idx::Vector{Int},
+    nthreads::Int,
+) where {T}
     Am = _as_matrix(T, A)
     if method === :unrolled
         return T(_haf_direct(Am, idx))
     else
-        return T(_haf_dp(Am, idx, _dp_plan(length(idx))))
+        return T(_haf_dp(Am, idx, _dp_plan(length(idx)); nthreads))
     end
 end
 
@@ -857,7 +864,7 @@ function hafnian(
         # Distinct rows in their natural order, so no index vector needs materialising.
         return T(_haf_unrolled_range(_as_matrix(T, A), N))
     elseif chosen === :dp
-        return _haf_direct_method(T, :dp, A, collect(1:N))
+        return _haf_direct_method(T, :dp, A, collect(1:N), nthreads)
     end
 
     # Match vertex 2i-1 with 2i, then reorder into the [first halves; second halves] layout.
@@ -932,7 +939,7 @@ function hafnian_repeated(
     x, edge_reps = matched_reps(rpt)
     chosen = method === :auto ? _choose_method(total, edge_reps, nthreads) : method
     if chosen !== :sieve
-        return _haf_direct_method(T, chosen, A, _expanded_indices(rpt, total))
+        return _haf_direct_method(T, chosen, A, _expanded_indices(rpt, total), nthreads)
     end
     return _calc_hafnian(_permuted(T, A, x), edge_reps; nthreads, glynn)
 end

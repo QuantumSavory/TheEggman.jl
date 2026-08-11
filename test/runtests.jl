@@ -187,19 +187,37 @@ end
             # The closed-form counts drive the strategy choice before any plan exists, so they must
             # match what enumeration actually produces.
             @test plan.nstates == nstates
-            @test length(plan.child) == ntrans
-            @test length(plan.pair) == ntrans
+            @test length(plan.trans) == ntrans
             @test plan.starts[1] == 1
             @test plan.starts[end] == ntrans + 1
             @test issorted(plan.starts)
             # A single forward pass is only valid if every state's children precede it.
-            @test all(s -> all(plan.child[plan.starts[s]:plan.starts[s+1]-1] .< s), 2:nstates)
+            children(s) = plan.trans[plan.starts[s]:plan.starts[s+1]-1] .>> TheEggman._DP_PAIR_BITS
+            @test all(s -> all(children(s) .< s), 2:nstates)
             # State 1 is the empty set (no transitions) and the last state is the full set.
             @test plan.starts[2] == 1
             @test plan.starts[nstates+1] - plan.starts[nstates] == K - 1
-            @test all(1 .<= plan.pair .<= K * (K - 1) ÷ 2)
+            @test all(1 .<= (plan.trans .& TheEggman._DP_PAIR_MASK) .<= K * (K - 1) ÷ 2)
         end
         @test TheEggman._dp_plan(8) === TheEggman._dp_plan(8)   # cached, not rebuilt
+    end
+
+    @testset "DP threading is exact and level-safe" begin
+        # Each state is written by exactly one task and reads only levels already joined, so the
+        # arithmetic is identical regardless of how the levels get chunked — not merely close.
+        rng = MersenneTwister(18)
+        for N in (16, 20, 24)
+            A = randsym(rng, ComplexF64, N)
+            ref = hafnian(A; method = :dp, nthreads = 1)
+            for nt in (2, 3, 7, 12)
+                @test hafnian(A; method = :dp, nthreads = nt) === ref
+            end
+        end
+        # Chunking never outruns the level it is splitting, and never returns a useless zero.
+        for (ntrans, n, nt) in ((10, 5, 12), (10^6, 3, 12), (10^6, 10^5, 12), (0, 1, 8))
+            c = TheEggman._dp_level_chunks(ntrans, n, nt)
+            @test 1 <= c <= min(nt, n)
+        end
     end
 
     @testset "DP is at least as accurate as the sieve" begin

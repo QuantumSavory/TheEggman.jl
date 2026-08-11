@@ -49,10 +49,15 @@ are constrained to `F(K+1)` of them — a Fibonacci number, so the state space g
 | sieve work     | 106k | 1.0M  | 7.9M  | 54M    | 393M    |
 
 The subset structure depends only on the degree, so it is precomputed once per `K` into a cached
-plan and the evaluation is a flat CSR walk with no hashing or bitmask arithmetic. Single-threaded,
-this beats the 12-thread sieve by 4–21×. Plans cost roughly 8 bytes per transition and are built on
-first use: 0.7 MB / 3 ms at `N = 20`, 48 MB / 250 ms at `N = 28`, then cached for the session.
-`DP_MAX` is where that stops being reasonable.
+plan, and the evaluation is a flat CSR walk with no hashing or bitmask arithmetic — each transition
+one packed `Int32`. Levels are evaluated in order and split across tasks within a level, where the
+states are mutually independent; results are bit-identical regardless of thread count. Plans cost
+4 bytes per transition and are built on first use: 0.4 MB / 3 ms at `N = 20`, 24 MB / 250 ms at
+`N = 28`, then cached for the session. `DP_MAX` is where that stops being reasonable.
+
+Parallel scaling tops out near 4× on 12 threads rather than approaching the thread count: two
+indirect loads per multiply make the loop memory-bound once several cores are running. Degrees below
+`N ≈ 20` run serially, where the levels are too small to repay a spawn.
 
 **`:sieve` — everything else.** The `O(N³ 2^(N/2))` finite-difference sieve of
 [Björklund, Gupt & Quesada](https://arxiv.org/abs/2108.01622), the algorithm `thewalrus` uses. It is
@@ -96,17 +101,18 @@ On a 12-thread i7-1365U, median speedup over `thewalrus` at total degree `N`:
 
 | N  | `hafnian` (distinct rows) | `hafnian_repeated` (rpt = 2) |
 |----|---------------------------|------------------------------|
-| 8  | 626x                      | 301x                         |
-| 12 | 88x                       | 49x                          |
-| 16 | 77x                       | 23x                          |
-| 20 | 46x                       | 14x                          |
-| 24 | 35x                       | 17x                          |
-| 28 | 27x                       | 10x                          |
+| 8  | 388x                      | 418x                         |
+| 12 | 138x                      | 72x                          |
+| 16 | 67x                       | 19x                          |
+| 20 | 54x                       | 21x                          |
+| 24 | 92x                       | 15x                          |
+| 28 | 72x                       | 13x                          |
 
 The `hafnian` column is unrolled at N=8/12 and DP above; the `hafnian_repeated` column falls back to
 the sieve from N=20 on, where repetition has made it the cheapest option, so those entries are
 sieve-vs-sieve.
 
 Both libraries use every core, so these are wall-clock ratios on a thermally-constrained laptop and
-the run-to-run spread is wide. Timings exclude one-time warmup on both sides — numba's JIT for
-thewalrus, DP plan construction for TheEggman.jl.
+the run-to-run spread is wide — treat the exact multipliers as indicative and the ordering as the
+stable part. Timings exclude one-time warmup on both sides: numba's JIT for thewalrus, DP plan
+construction for TheEggman.jl.
