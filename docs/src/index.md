@@ -35,16 +35,16 @@ julia> hafnian_repeated(B, [2, 2]) ≈ hafnian(TheEggman.reduction(B, [2, 2]))
 true
 ```
 
-Which algorithm runs is chosen automatically. Above total degree `TheEggman.UNROLL_MAX` (12) it is
-the `O(N³ 2^(N/2))` finite-difference sieve of
-[Björklund, Gupt & Quesada](https://arxiv.org/abs/2108.01622) — see `src/hafnian.jl` for the identity
-being evaluated and where this implementation diverges from `thewalrus`. At or below the cap, a
-`@generated` function emits the sum over perfect matchings as one branch-free expression, which is
-both faster and more accurate; see `src/unrolled.jl`. Repeated rows can shrink the sieve below even
-that, so the choice is a cost comparison rather than a size cutoff.
+Which algorithm runs is chosen automatically, by comparing costs that are all known before any work
+starts. `method=:unrolled` uses a `@generated` branch-free expansion of the definition (degrees up to
+`TheEggman.UNROLL_MAX`); `method=:dp` evaluates the same recursion over memoised subsets, whose count
+grows only like `φ^K` (degrees up to `TheEggman.DP_MAX`); `method=:sieve` runs the `O(N³ 2^(N/2))`
+finite-difference sieve of [Björklund, Gupt & Quesada](https://arxiv.org/abs/2108.01622), which is
+the fallback at large degrees and the best choice when repeated rows shrink it. See `src/unrolled.jl`,
+`src/dp.jl` and `src/hafnian.jl` respectively.
 
-Pass `unrolled=false` to force the sieve, or `glynn=false` to select the inclusion–exclusion sieve
-variant instead of the default Glynn one (about 2.5× faster, about 1000× less accurate).
+`glynn=false` selects the inclusion–exclusion sieve variant instead of the default Glynn one (about
+2.5× faster, about 1000× less accurate), and has no effect on the other two strategies.
 
 Loop hafnians are not implemented yet.
 

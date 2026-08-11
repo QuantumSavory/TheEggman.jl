@@ -626,6 +626,21 @@ end
 _term_cost(E::Int, n::Int) = (5 * (2E)^3) ÷ 3 + 2E * n * n
 
 """
+    _sieve_chunks(steps, E, n, nthreads) -> Int
+
+How many tasks the sieve would split into.
+
+Spawning costs a few microseconds per task and the chunks are equal-sized, so on a machine with
+uneven cores a short parallel run waits on its slowest chunk and loses to running serially. The
+threshold was measured on the `benchmark/thewalrus` sweep: below it, every thread count tested was
+slower than one; above it, using all of them was fastest.
+
+Also consulted by [`_choose_method`](@ref), since the sieve is the only strategy that threads.
+"""
+@inline _sieve_chunks(steps::Int, E::Int, n::Int, nthreads::Int) =
+    steps * _term_cost(E, n) < 90_000 ? 1 : min(nthreads, steps)
+
+"""
     _calc_hafnian(Ax, edge_reps; nthreads) -> T
 
 Run the Glynn sieve over `Ax`, a matrix already permuted so that the fixed perfect matching pairs
@@ -657,11 +672,7 @@ function _calc_hafnian(
         binoms[a+1, b+1] = b <= a ? R(binomial(a, b)) : zero(R)
     end
 
-    # Spawning costs a few microseconds per task and the chunks are equal-sized, so on a machine
-    # with uneven cores a short parallel run waits on its slowest chunk and loses to running
-    # serially. The threshold was measured on the `benchmark/thewalrus` sweep: below it, every
-    # thread count tested was slower than one; above it, using all of them was fastest.
-    nchunks = steps * _term_cost(E, n) < 90_000 ? 1 : min(nthreads, steps)
+    nchunks = _sieve_chunks(steps, E, n, nthreads)
 
     gv = glynn ? Val(true) : Val(false)
     H = if nchunks == 1
@@ -709,7 +720,7 @@ _as_matrix(::Type{T}, A::AbstractMatrix) where {T} = A isa Matrix{T} ? A : Matri
     _prefer_unrolled(K, sieve_work) -> Bool
 
 Decide between the unrolled kernel of [`_haf_direct`](@ref) and the sieve, given the total degree
-`K` and the sieve's total multiply-add count.
+`K` and the sieve's wall-clock-equivalent multiply-add count.
 
 Comparing the two counts directly is a calibration, not a cost model: their per-operation costs
 differ (the unrolled kernel spills its live subset values to L1-resident stack, the sieve's
@@ -728,15 +739,76 @@ distinct rows the unrolled kernel wins by one to two orders of magnitude at ever
 function _sieve_work(edge_reps::Vector{Int})
     E = length(edge_reps)
     E == 0 && return 0
+    return _sieve_steps(edge_reps) * _term_cost(E, sum(edge_reps))
+end
+
+function _sieve_steps(edge_reps::Vector{Int})
     steps = (edge_reps[1] + 2) ÷ 2
-    for i in 2:E
+    for i in 2:length(edge_reps)
         steps *= edge_reps[i] + 1
     end
-    return steps * _term_cost(E, sum(edge_reps))
+    return steps
 end
 
 """
-    hafnian(A; nthreads=Threads.nthreads(), glynn=true, unrolled=true) -> Number
+    _choose_method(K, edge_reps, nthreads) -> Symbol
+
+Pick between `:unrolled`, `:dp` and `:sieve` for a problem of total degree `K` whose sieve would run
+over `edge_reps`.
+
+All three compute the same thing; only their costs differ, and those costs are known in advance
+(see [`_prefer_unrolled`](@ref) and [`_prefer_dp`](@ref)). The sieve's count is divided by the
+number of tasks it would spread over, since it is the only one of the three that threads — with one
+thread available the other two win more often, which is the intended behaviour.
+
+The unrolled kernel is tested first and so keeps every degree it covers, even though the DP edges it
+out by ~13% on a `min`-of-many microbenchmark at `K = 12`. That microbenchmark is misleading: the DP
+allocates its state array on every call (5 KB at `K = 12`, against 144 bytes), and once the same
+call is made repeatedly with GC time counted the unrolled kernel is ahead again at both `K = 10` and
+`K = 12`.
+"""
+function _choose_method(K::Int, edge_reps::Vector{Int}, nthreads::Int)
+    isempty(edge_reps) && return :sieve
+    work = _sieve_work(edge_reps)
+    nchunks = _sieve_chunks(_sieve_steps(edge_reps), length(edge_reps), sum(edge_reps), nthreads)
+    effective = work ÷ max(nchunks, 1)
+    _prefer_unrolled(K, effective) && return :unrolled
+    _prefer_dp(K, work, nchunks) && return :dp
+    return :sieve
+end
+
+# Expanded index list `idx` with row `i` repeated `rpt[i]` times, as both direct kernels want it.
+function _expanded_indices(rpt::AbstractVector{<:Integer}, total::Int)
+    idx = Vector{Int}(undef, total)
+    n = 0
+    @inbounds for i in eachindex(rpt), _ in 1:rpt[i]
+        idx[n+=1] = Int(i)
+    end
+    return idx
+end
+
+# Run whichever direct (non-sieve) kernel was selected.
+function _haf_direct_method(::Type{T}, method::Symbol, A::AbstractMatrix, idx::Vector{Int}) where {T}
+    Am = _as_matrix(T, A)
+    if method === :unrolled
+        return T(_haf_direct(Am, idx))
+    else
+        return T(_haf_dp(Am, idx, _dp_plan(length(idx))))
+    end
+end
+
+function _check_method(method::Symbol, K::Int)
+    method in (:auto, :unrolled, :dp, :sieve) ||
+        throw(ArgumentError("method must be :auto, :unrolled, :dp or :sieve, got :$method"))
+    method === :unrolled && K > UNROLL_MAX &&
+        throw(ArgumentError("method=:unrolled needs degree ≤ $UNROLL_MAX, got $K"))
+    method === :dp && K > DP_MAX &&
+        throw(ArgumentError("method=:dp needs degree ≤ $DP_MAX, got $K"))
+    return nothing
+end
+
+"""
+    hafnian(A; nthreads=Threads.nthreads(), glynn=true, method=:auto) -> Number
 
 Hafnian of the square symmetric matrix `A`: the sum over all perfect matchings of
 ``∏_{(i,j)} A[i,j]``.
@@ -744,11 +816,17 @@ Hafnian of the square symmetric matrix `A`: the sum over all perfect matchings o
 The diagonal of `A` is ignored (this is the plain hafnian, not the loop hafnian). An odd-sized
 matrix has no perfect matching and gives `0`; a `0 × 0` matrix gives `1`.
 
-Above degree `UNROLL_MAX` this runs the ``O(n³ 2ⁿ)`` Björklund/Glynn sieve on the `2n × 2n` input,
-parallelised over `nthreads` tasks when the problem is large enough to pay for them. At or below it,
-a fully unrolled evaluation of the definition is both faster and more accurate; pass
-`unrolled=false` to force the sieve. `glynn` selects the sieve variant and has no effect on the
-unrolled path.
+Three strategies compute this, chosen automatically by comparing their known costs, and `method`
+overrides the choice:
+
+  * `:unrolled` — the matching sum emitted as straight-line code, for degrees up to `UNROLL_MAX`.
+  * `:dp` — the same recursion evaluated over memoised subsets, for degrees up to `DP_MAX`. Usually
+    the fastest option in between, by a wide margin.
+  * `:sieve` — the ``O(n³ 2ⁿ)`` Björklund/Glynn sieve, parallelised over `nthreads` tasks when the
+    problem is large enough to pay for them. The fallback above `DP_MAX`, and the best choice when
+    repeated rows shrink it far enough.
+
+`glynn` selects the sieve variant and has no effect on the other two.
 
 # Examples
 ```jldoctest
@@ -763,17 +841,23 @@ function hafnian(
     A::AbstractMatrix;
     nthreads::Int = nthreads(),
     glynn::Bool = true,
-    unrolled::Bool = true,
+    method::Symbol = :auto,
 )
     N = LinearAlgebra.checksquare(A)
     T = _haf_eltype(A)
     N == 0 && return one(T)
     isodd(N) && return zero(T)
+    _check_method(method, N)
     _check_symmetric(A)
 
     E = N ÷ 2
-    if unrolled && _prefer_unrolled(N, _sieve_work(ones(Int, E)))
+    edge_reps = ones(Int, E)
+    chosen = method === :auto ? _choose_method(N, edge_reps, nthreads) : method
+    if chosen === :unrolled
+        # Distinct rows in their natural order, so no index vector needs materialising.
         return T(_haf_unrolled_range(_as_matrix(T, A), N))
+    elseif chosen === :dp
+        return _haf_direct_method(T, :dp, A, collect(1:N))
     end
 
     # Match vertex 2i-1 with 2i, then reorder into the [first halves; second halves] layout.
@@ -782,7 +866,7 @@ function hafnian(
         x[i] = 2i - 1
         x[E+i] = 2i
     end
-    return _calc_hafnian(_permuted(T, A, x), ones(Int, E); nthreads, glynn)
+    return _calc_hafnian(_permuted(T, A, x), edge_reps; nthreads, glynn)
 end
 
 # hafnian(A) on the full index range 1:N — no index vector needs materialising.
@@ -798,7 +882,7 @@ end
 end
 
 """
-    hafnian_repeated(A, rpt; nthreads=Threads.nthreads(), glynn=true, unrolled=true) -> Number
+    hafnian_repeated(A, rpt; nthreads=Threads.nthreads(), glynn=true, method=:auto) -> Number
 
 Hafnian of the matrix obtained by repeating row and column `i` of `A` exactly `rpt[i]` times, i.e.
 `hafnian(reduction(A, rpt))`, but without ever forming that larger matrix.
@@ -810,10 +894,9 @@ of the expanded matrix.
 
 Returns `1` when `sum(rpt) == 0` and `0` when `sum(rpt)` is odd.
 
-Small totals may be served by an unrolled kernel instead of the sieve, but only when that is
-actually cheaper — heavy repetition shrinks the sieve faster than it shrinks the matching count, so
-e.g. `rpt = [6, 6]` still sieves. Pass `unrolled=false` to force the sieve; `glynn` selects the
-sieve variant and has no effect on the unrolled path.
+`method` selects among the same three strategies as [`hafnian`](@ref). Repetition is what makes the
+sieve cheap, so it wins here far more often than it does for distinct rows: `rpt = [6, 6]` sieves
+where `rpt = [5, 5, 1, 1]` does not, and `fill(2, 14)` sieves where 28 distinct rows would not.
 
 # Examples
 ```jldoctest
@@ -833,26 +916,23 @@ function hafnian_repeated(
     rpt::AbstractVector{<:Integer};
     nthreads::Int = nthreads(),
     glynn::Bool = true,
-    unrolled::Bool = true,
+    method::Symbol = :auto,
 )
     N = LinearAlgebra.checksquare(A)
     length(rpt) == N || throw(DimensionMismatch("rpt has length $(length(rpt)), expected $N"))
     any(<(0), rpt) && throw(ArgumentError("rpt must contain non-negative integers"))
     T = _haf_eltype(A)
 
-    total = sum(rpt; init = 0)
+    total = Int(sum(rpt; init = 0))
     total == 0 && return one(T)
     isodd(total) && return zero(T)
+    _check_method(method, total)
     _check_symmetric(A)
 
     x, edge_reps = matched_reps(rpt)
-    if unrolled && _prefer_unrolled(Int(total), _sieve_work(edge_reps))
-        idx = Vector{Int}(undef, total)
-        k = 0
-        @inbounds for i in eachindex(rpt), _ in 1:rpt[i]
-            idx[k+=1] = i
-        end
-        return T(_haf_direct(_as_matrix(T, A), idx))
+    chosen = method === :auto ? _choose_method(total, edge_reps, nthreads) : method
+    if chosen !== :sieve
+        return _haf_direct_method(T, chosen, A, _expanded_indices(rpt, total))
     end
     return _calc_hafnian(_permuted(T, A, x), edge_reps; nthreads, glynn)
 end

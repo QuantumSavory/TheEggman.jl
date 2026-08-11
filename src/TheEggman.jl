@@ -13,6 +13,7 @@ using LinearAlgebra
 export hafnian, hafnian_repeated
 
 include("unrolled.jl")
+include("dp.jl")
 include("hafnian.jl")
 
 # Emitting the unrolled kernels is the one genuinely slow piece of compilation in this package

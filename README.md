@@ -26,35 +26,40 @@ Loop hafnians are not implemented yet.
 
 ## Algorithm
 
-`hafnian` sums `∏ A[i,j]` over all perfect matchings of the row indices. Two algorithms cover the
-range, chosen automatically by a cost comparison.
+`hafnian` sums `∏ A[i,j]` over all perfect matchings of the row indices. Three strategies cover the
+range, chosen per problem by comparing costs that are all known in advance. `method=:unrolled`,
+`:dp` or `:sieve` overrides the choice.
 
-**Small degrees (`N ≤ TheEggman.UNROLL_MAX`, currently 12)** evaluate the definition directly, as a
-single branch-free expression emitted by a `@generated` function. Expanding the matching sum naively
-would produce `(N-1)!!` products — 10395 at `N = 12` — so the generator memoises on the
-remaining-index bitmask and emits one temporary per distinct subset instead, collapsing the code to
-the size of the underlying DAG:
+**`:unrolled` — degrees up to `TheEggman.UNROLL_MAX` (12).** Evaluates the definition as a single
+branch-free expression emitted by a `@generated` function. Expanding the matching sum naively would
+produce `(N-1)!!` products — 10395 at `N = 12` — so the generator memoises on the remaining-index
+bitmask and emits one temporary per distinct subset, collapsing the code to the size of the
+underlying DAG (232 subsets, 1055 multiplies at `N = 12`). Allocation-free, and the fastest option
+at these sizes once repeated-call GC is counted.
 
-| N  | subsets emitted | multiplies | multiplies if unshared |
-|----|-----------------|------------|------------------------|
-| 8  | 33              | 87         | 315                    |
-| 10 | 88              | 317        | 3780                   |
-| 12 | 232             | 1055       | 51975                  |
+**`:dp` — degrees up to `TheEggman.DP_MAX` (28).** The same recursion, evaluated at runtime over
+memoised subsets. Because it always pairs off the *smallest* remaining index, the subsets it reaches
+are constrained to `F(K+1)` of them — a Fibonacci number, so the state space grows like `φ^K ≈
+1.618^K`, not `2^K`. That is worse asymptotically than the sieve's `1.414^K K³` (they cross around
+`K ≈ 105`) but across the whole computable range the sieve does 65–100× more arithmetic:
 
-This is 7×–52× faster than the sieve below the cap, and more accurate too — it is the definition,
-with none of the cancellation between large signed terms that a sieve relies on. The cap is set by
-compile time, not by where the kernel stops winning; the kernels are precompiled for `Float64` and
-`ComplexF64`, which is most of the package's ~3s precompile.
+| K              | 12   | 16    | 20    | 24     | 28      |
+|----------------|------|-------|-------|--------|---------|
+| DP transitions | 1076 | 10226 | 89665 | 748776 | 6052062 |
+| sieve work     | 106k | 1.0M  | 7.9M  | 54M    | 393M    |
 
-**Larger degrees** use the `O(N³ 2^(N/2))` finite-difference sieve of
-[Björklund, Gupt & Quesada](https://arxiv.org/abs/2108.01622), the same algorithm as `thewalrus`:
-fix a perfect matching, sum over sign patterns on its edges, and read off a single coefficient of a
-generating function for each.
+The subset structure depends only on the degree, so it is precomputed once per `K` into a cached
+plan and the evaluation is a flat CSR walk with no hashing or bitmask arithmetic. Single-threaded,
+this beats the 12-thread sieve by 4–21×. Plans cost roughly 8 bytes per transition and are built on
+first use: 0.7 MB / 3 ms at `N = 20`, 48 MB / 250 ms at `N = 28`, then cached for the session.
+`DP_MAX` is where that stops being reasonable.
 
-`hafnian_repeated` exploits repeated rows by pairing the repeats into as few distinct edges as
-possible, which turns the sieve into a much shorter mixed-radix sum over *multiplicities*. Enough
-repetition shrinks the sieve below even the unrolled kernel, so the crossover is a cost comparison
-rather than a size cutoff — `rpt = [6, 6]` sieves, `rpt = [5, 5, 1, 1]` does not.
+**`:sieve` — everything else.** The `O(N³ 2^(N/2))` finite-difference sieve of
+[Björklund, Gupt & Quesada](https://arxiv.org/abs/2108.01622), the algorithm `thewalrus` uses. It is
+the fallback above `DP_MAX`, and it is also the *best* choice whenever repeated rows shrink it far
+enough — `hafnian_repeated` pairs repeats into as few distinct edges as possible, turning the sieve
+into a short mixed-radix sum over multiplicities, so e.g. `rpt = fill(2, 14)` sieves where 28
+distinct rows would use the DP.
 
 Where the sieve diverges from `thewalrus` is in its inner loop. `thewalrus` extracts the
 generating-function coefficient from power traces `tr(Mᵏ)` built by `k` explicit matrix products,
@@ -70,9 +75,11 @@ assumed: the Hessenberg reduction uses Gaussian similarity transforms with parti
 (half the flops of Householder, with no meaningful accuracy cost at these sizes), and for
 `Complex{Float64}`/`Complex{Float32}` it runs on split real/imaginary arrays, which vectorise where
 interleaved complex storage does not. The sieve is spread across threads once it is large enough to
-be worth it.
+be worth it; the other two strategies are single-threaded.
 
-Results agree with `thewalrus` to ~1e-14 relative on random complex symmetric matrices.
+Both direct strategies are more accurate than either sieve variant, since they sum products of
+matrix entries with no cancellation between large signed terms. Results agree with `thewalrus` to
+~1e-14 relative on random complex symmetric matrices.
 
 ## Benchmarks
 
@@ -89,16 +96,17 @@ On a 12-thread i7-1365U, median speedup over `thewalrus` at total degree `N`:
 
 | N  | `hafnian` (distinct rows) | `hafnian_repeated` (rpt = 2) |
 |----|---------------------------|------------------------------|
-| 8  | 657x                      | 234x                         |
-| 12 | 85x                       | 52x                          |
-| 16 | 6.3x                      | 6.4x                         |
-| 20 | 3.0x                      | 15.8x                        |
-| 24 | 2.7x                      | 16.3x                        |
-| 28 | 6.1x                      | 6.9x                         |
+| 8  | 626x                      | 301x                         |
+| 12 | 88x                       | 49x                          |
+| 16 | 77x                       | 23x                          |
+| 20 | 46x                       | 14x                          |
+| 24 | 35x                       | 17x                          |
+| 28 | 27x                       | 10x                          |
 
-The step at N=16 is where the unrolled kernels stop and both libraries are running the same sieve.
+The `hafnian` column is unrolled at N=8/12 and DP above; the `hafnian_repeated` column falls back to
+the sieve from N=20 on, where repetition has made it the cheapest option, so those entries are
+sieve-vs-sieve.
 
 Both libraries use every core, so these are wall-clock ratios on a thermally-constrained laptop and
-the run-to-run spread is wide (the sieve-only sizes range from 2.7x to 6.6x depending on whether
-medians or best-case times are compared). The ordering is the stable part: TheEggman.jl was faster
-at every size in both regimes.
+the run-to-run spread is wide. Timings exclude one-time warmup on both sides — numba's JIT for
+thewalrus, DP plan construction for TheEggman.jl.

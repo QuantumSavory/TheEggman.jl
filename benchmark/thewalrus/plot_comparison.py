@@ -4,10 +4,11 @@ TheEggman.jl's hafnian/hafnian_repeated at matching total degrees N, in two side
   rpt=1 (left):  N distinct rows, each used once -- plain `hafnian(A)`.
   rpt=2 (right): N/2 distinct rows, each doubled -- `hafnian_repeated(A, rpt)`.
 
-thewalrus always runs the Bjoerklund/Glynn O(N^3 2^(N/2)) sieve. TheEggman.jl runs the same sieve
-above total degree UNROLL_MAX (12), where the gap is implementation quality; at or below it, it
-switches to a compile-time-unrolled sum over perfect matchings, which is why the two smallest groups
-pull so far ahead. The median speedup is annotated above each group.
+thewalrus always runs the Bjoerklund/Glynn O(N^3 2^(N/2)) sieve. TheEggman.jl picks between three
+strategies by cost, so most of these groups are comparing different algorithms rather than different
+implementations of one: an unrolled matching sum at N<=12, a subset DP up to N=28, and the same
+sieve when repeated rows make it cheap (which is why the rpt=2 panel falls back to sieve-vs-sieve at
+the larger N). The median speedup is annotated above each group.
 
 Usage: python plot_comparison.py [bench_dir]
 """
@@ -127,7 +128,7 @@ for ax, rpt in zip(axes, rpts):
 
 axes[0].set_ylabel("Execution Time (s)")
 
-subtitle = "N<=12: unrolled matching sum vs sieve  |  N>12: both sieve"
+subtitle = "TheEggman.jl picks per problem: unrolled sum / subset DP / sieve"
 if meta:
     subtitle += f" - Julia {meta.get('julia_version', '?')}, {meta.get('nthreads', '?')} threads"
 fig.suptitle(f"Hafnian: TheEggman.jl vs thewalrus\n{subtitle}", fontsize=10)

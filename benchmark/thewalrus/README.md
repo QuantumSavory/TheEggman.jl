@@ -4,14 +4,18 @@ Compares TheEggman.jl's `hafnian` / `hafnian_repeated` against
 [thewalrus](https://github.com/XanaduAI/thewalrus), the Xanadu package this one ports.
 
 thewalrus always runs the Björklund/Glynn `O(N^3 2^(N/2))` finite-difference sieve
-([arXiv:2108.01622](https://arxiv.org/abs/2108.01622)). TheEggman.jl runs the same sieve above total
-degree `UNROLL_MAX` (12) — there the comparison is one of implementations, not asymptotics — and
-below it switches to a compile-time-unrolled sum over perfect matchings, which is a different
-algorithm and wins by two orders of magnitude. The N=8 and N=12 groups therefore measure something
-different from the rest of the sweep, and the plot's subtitle says so.
+([arXiv:2108.01622](https://arxiv.org/abs/2108.01622)). TheEggman.jl chooses per problem between an
+unrolled matching sum (N ≤ 12), a subset DP (N ≤ 28) and the same sieve, so most groups in this
+sweep compare *different algorithms* rather than two implementations of one. The exception is the
+rpt=2 panel from N=20 on, where repetition has made the sieve the cheapest option for both libraries
+and the comparison is sieve-vs-sieve.
 
-Both saturate every core — thewalrus through numba's `prange`, TheEggman.jl through Julia tasks —
-so the numbers are whole-machine wall clock.
+Both saturate every core — thewalrus through numba's `prange`, TheEggman.jl only in its sieve — so
+the numbers are whole-machine wall clock.
+
+Neither side's warmup is timed: the Python script calls each function once before measuring so
+numba's JIT is done, and BenchmarkTools does the same, which also builds TheEggman.jl's DP plan (up
+to ~250 ms at N=28). A cold one-shot call at a new degree pays that; a benchmark loop does not.
 
 Two regimes are benchmarked at total degree N = 8, 12, 16, 20, 24, 28:
 

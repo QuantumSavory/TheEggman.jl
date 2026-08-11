@@ -89,17 +89,17 @@ end
         rng = MersenneTwister(5)
         for N in (4, 8, 12)
             A = randsym(rng, ComplexF64, N)
-            @test hafnian(A; glynn = false, unrolled = false) ≈
-                  hafnian(A; unrolled = false) rtol = 1e-9
+            @test hafnian(A; glynn = false, method = :sieve) ≈
+                  hafnian(A; method = :sieve) rtol = 1e-9
         end
     end
 
     @testset "hafnian: threading is deterministic in value" begin
         rng = MersenneTwister(6)
         A = randsym(rng, ComplexF64, 14)
-        ref = hafnian(A; nthreads = 1, unrolled = false)
+        ref = hafnian(A; nthreads = 1, method = :sieve)
         for nt in (2, 3, 8)
-            @test hafnian(A; nthreads = nt, unrolled = false) ≈ ref rtol = 1e-10
+            @test hafnian(A; nthreads = nt, method = :sieve) ≈ ref rtol = 1e-10
         end
     end
 
@@ -111,8 +111,8 @@ end
         setprecision(BigFloat, 256) do
             for N in (10, 14, 18)
                 A = randsym(rng, ComplexF64, N)
-                ref = hafnian(Complex{BigFloat}.(A); nthreads = 1, unrolled = false)
-                err = abs(hafnian(A; unrolled = false) - ref) / abs(ref)
+                ref = hafnian(Complex{BigFloat}.(A); nthreads = 1, method = :sieve)
+                err = abs(hafnian(A; method = :sieve) - ref) / abs(ref)
                 @test err < 1e-11
             end
         end
@@ -151,13 +151,20 @@ end
         end
     end
 
-    @testset "unrolled kernels agree with the sieve" begin
+    @testset "all three strategies agree" begin
         rng = MersenneTwister(14)
         for N in 2:2:TheEggman.UNROLL_MAX
             A = randsym(rng, ComplexF64, N)
-            @test hafnian(A) ≈ hafnian(A; unrolled = false) rtol = 1e-10
+            @test hafnian(A; method = :unrolled) ≈ hafnian(A; method = :sieve) rtol = 1e-10
+            @test hafnian(A; method = :dp) ≈ hafnian(A; method = :sieve) rtol = 1e-10
             R = randsym(rng, Float64, N)
-            @test hafnian(R) ≈ hafnian(R; unrolled = false) rtol = 1e-10
+            @test hafnian(R; method = :unrolled) ≈ hafnian(R; method = :sieve) rtol = 1e-10
+            @test hafnian(R; method = :dp) ≈ hafnian(R; method = :sieve) rtol = 1e-10
+        end
+        # Above the unrolled cap only the DP and the sieve remain.
+        for N in (14, 16, 18)
+            A = randsym(rng, ComplexF64, N)
+            @test hafnian(A; method = :dp) ≈ hafnian(A; method = :sieve) rtol = 1e-9
         end
         # Repeated indices exercise the same kernels through a different entry point, and are the
         # only case where the unrolled path reads the diagonal of `A`.
@@ -165,9 +172,67 @@ end
                     [5, 5, 1, 1], [10, 2], [12], [4, 4], [9, 3], [6, 2, 2, 2])
             d = length(rpt)
             A = randsym(rng, ComplexF64, d)
-            @test hafnian_repeated(A, rpt) ≈ hafnian_repeated(A, rpt; unrolled = false) rtol = 1e-10
+            @test hafnian_repeated(A, rpt; method = :unrolled) ≈
+                  hafnian_repeated(A, rpt; method = :sieve) rtol = 1e-10
+            @test hafnian_repeated(A, rpt; method = :dp) ≈
+                  hafnian_repeated(A, rpt; method = :sieve) rtol = 1e-10
             @test hafnian_repeated(A, rpt) ≈ brute_hafnian(reduction(A, rpt)) rtol = 1e-10
         end
+    end
+
+    @testset "DP plan structure" begin
+        for K in (4, 8, 12, 16)
+            plan = TheEggman._dp_plan(K)
+            nstates, ntrans = TheEggman._dp_counts(K)
+            # The closed-form counts drive the strategy choice before any plan exists, so they must
+            # match what enumeration actually produces.
+            @test plan.nstates == nstates
+            @test length(plan.child) == ntrans
+            @test length(plan.pair) == ntrans
+            @test plan.starts[1] == 1
+            @test plan.starts[end] == ntrans + 1
+            @test issorted(plan.starts)
+            # A single forward pass is only valid if every state's children precede it.
+            @test all(s -> all(plan.child[plan.starts[s]:plan.starts[s+1]-1] .< s), 2:nstates)
+            # State 1 is the empty set (no transitions) and the last state is the full set.
+            @test plan.starts[2] == 1
+            @test plan.starts[nstates+1] - plan.starts[nstates] == K - 1
+            @test all(1 .<= plan.pair .<= K * (K - 1) ÷ 2)
+        end
+        @test TheEggman._dp_plan(8) === TheEggman._dp_plan(8)   # cached, not rebuilt
+    end
+
+    @testset "DP is at least as accurate as the sieve" begin
+        # The DP sums products of matrix entries directly, with none of the cancellation between
+        # large signed terms that the sieve depends on.
+        rng = MersenneTwister(15)
+        setprecision(BigFloat, 256) do
+            for N in (14, 18, 22)
+                A = randsym(rng, ComplexF64, N)
+                ref = hafnian(Complex{BigFloat}.(A); nthreads = 1, method = :sieve)
+                dp_err = abs(hafnian(A; method = :dp) - ref) / abs(ref)
+                sieve_err = abs(hafnian(A; method = :sieve) - ref) / abs(ref)
+                @test dp_err < 1e-13
+                @test dp_err <= max(sieve_err, 1e-15)
+            end
+        end
+    end
+
+    @testset "method selection" begin
+        # Distinct rows: unrolled up to its cap, then the DP up to its own.
+        @test TheEggman._choose_method(8, ones(Int, 4), 12) === :unrolled
+        @test TheEggman._choose_method(12, ones(Int, 6), 12) === :unrolled
+        @test TheEggman._choose_method(20, ones(Int, 10), 12) === :dp
+        @test TheEggman._choose_method(28, ones(Int, 14), 12) === :dp
+        @test TheEggman._choose_method(32, ones(Int, 16), 12) === :sieve   # past DP_MAX
+        # Repetition is what makes the sieve cheap, so it takes over as reps grow.
+        @test TheEggman._choose_method(28, TheEggman.matched_reps(fill(2, 14))[2], 12) === :sieve
+        @test TheEggman._choose_method(16, TheEggman.matched_reps(fill(2, 8))[2], 12) === :dp
+        # Forcing a strategy it cannot serve is an error, not a silent fallback.
+        A = randsym(MersenneTwister(16), ComplexF64, 16)
+        @test_throws ArgumentError hafnian(A; method = :unrolled)
+        @test_throws ArgumentError hafnian(A; method = :nonsense)
+        @test_throws ArgumentError hafnian(randsym(MersenneTwister(17), ComplexF64, 32); method = :dp)
     end
 
     @testset "unrolled crossover picks the faster path" begin
@@ -256,12 +321,12 @@ end
     @testset "no allocation in the sieve inner loop" begin
         rng = MersenneTwister(12)
         A = randsym(rng, ComplexF64, 12)
-        hafnian(A; nthreads = 1, unrolled = false)
-        base = @allocated hafnian(A; nthreads = 1, unrolled = false)
+        hafnian(A; nthreads = 1, method = :sieve)
+        base = @allocated hafnian(A; nthreads = 1, method = :sieve)
         # Setup (permuted copy, binomials, one workspace) allocates; the 32 sieve terms must not.
         A2 = randsym(rng, ComplexF64, 16)
-        hafnian(A2; nthreads = 1, unrolled = false)
-        grown = @allocated hafnian(A2; nthreads = 1, unrolled = false)
+        hafnian(A2; nthreads = 1, method = :sieve)
+        grown = @allocated hafnian(A2; nthreads = 1, method = :sieve)
         # 4× the terms and a larger workspace, but nothing that scales with the term count.
         @test grown < 6 * base
     end
