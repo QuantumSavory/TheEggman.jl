@@ -1,0 +1,14 @@
+[project]
+name = "theeggman-thewalrus-bench"
+version = "0.1.0"
+description = "Isolated benchmark comparing TheEggman.jl's hafnian routines against Xanadu's thewalrus"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "thewalrus>=0.22.0",
+    "numpy>=2.0.0",
+    "matplotlib>=3.10.0",
+]
+
+# This is a standalone benchmark project, not a package to be built/installed.
+[tool.uv]
+package = false
