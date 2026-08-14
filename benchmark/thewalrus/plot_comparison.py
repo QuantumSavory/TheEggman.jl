@@ -8,7 +8,7 @@ thewalrus always runs the Bjoerklund/Glynn O(N^3 2^(N/2)) sieve. TheEggman.jl pi
 strategies by cost, so most of these groups are comparing different algorithms rather than different
 implementations of one: an unrolled matching sum at N<=12, a subset DP up to N=28, and the same
 sieve when repeated rows make it cheap (which is why the rpt=2 panel falls back to sieve-vs-sieve at
-the larger N). The median speedup is annotated above each group.
+the larger N). The mean speedup is annotated above each group.
 
 Usage: python plot_comparison.py [bench_dir]
 """
@@ -92,19 +92,19 @@ for ax, rpt in zip(axes, rpts):
         group_centers.append(base + (len(present) + 1) / 2)
 
     for pos, values, color in zip(positions, data, colors):
-        median = np.median(values)
+        mean = np.mean(values)
         if len(values) > max_points:
             values = rng.choice(values, size=max_points, replace=False)
         jitter = rng.uniform(-0.3, 0.3, size=len(values))
         ax.scatter(pos + jitter, values, s=6, color=color, alpha=0.5, edgecolors="none")
-        ax.plot([pos - 0.38, pos + 0.38], [median, median], color="black", lw=1.1, zorder=3)
+        ax.plot([pos - 0.38, pos + 0.38], [mean, mean], color="black", lw=1.1, zorder=3)
 
-    # Speedup label above each group, using medians.
+    # Speedup label above each group, using means.
     for center, N in zip(group_centers, Ns):
         if not {"eggman", "thewalrus"} <= groups[N].keys():
             continue
-        speedup = np.median(groups[N]["thewalrus"]) / np.median(groups[N]["eggman"])
-        top = max(np.median(groups[N][v]) for v in variants if v in groups[N])
+        speedup = np.mean(groups[N]["thewalrus"]) / np.mean(groups[N]["eggman"])
+        top = max(np.mean(groups[N][v]) for v in variants if v in groups[N])
         ax.annotate(
             f"{speedup:.1f}x",
             xy=(center, top),
