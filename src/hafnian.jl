@@ -715,16 +715,44 @@ end
 
 _haf_eltype(A::AbstractMatrix) = float(eltype(A))
 
+"""
+    _check_symmetric(A)
+
+Validate that `A` is symmetric to within `isapprox`'s default tolerance, and 1-based.
+
+This runs before every hafnian and is `O(N²)` against kernels that can be as short as 50 ns, so it
+is written to be cheap rather than obvious:
+
+  * an exact `==` fast path, which is what actually fires in practice — a matrix built the usual way
+    as `B + transpose(B)` has bitwise-identical mirrored entries, since floating-point addition is
+    commutative. It also keeps `Inf` entries comparing equal, as `isapprox` does.
+  * for anything else, the tolerance test squared. `isapprox` with the default `rtol` and `atol = 0`
+    asks `|x - y| ≤ √eps · max(|x|, |y|)`; both sides are non-negative, so comparing squares is
+    equivalent and replaces three `hypot` calls per entry pair with plain multiplications. The
+    squared tolerance is exactly `eps`.
+
+Symmetry is a property of the mathematical object here, not merely of the storage, so it is checked
+rather than assumed — but see the `Symmetric` method below, which knows the answer already.
+"""
 function _check_symmetric(A::AbstractMatrix)
     # Every index in this package is 1-based, and the kernels read `A` under `@inbounds`, so an
     # offset array would silently read out of bounds rather than merely give a wrong answer.
     Base.require_one_based_indexing(A)
     n = size(A, 1)
-    for j in 1:n, i in 1:j-1
-        isapprox(A[i, j], A[j, i]) || throw(ArgumentError("matrix is not symmetric at ($i, $j)"))
+    tol = eps(float(real(eltype(A))))
+    @inbounds for j in 1:n, i in 1:j-1
+        x = A[i, j]
+        y = A[j, i]
+        x == y && continue
+        abs2(x - y) <= tol * max(abs2(x), abs2(y)) ||
+            throw(ArgumentError("matrix is not symmetric at ($i, $j)"))
     end
     return nothing
 end
+
+# `Symmetric` mirrors one triangle on read, so it satisfies this by construction. `Hermitian` does
+# not (conjugation is not transposition for complex entries) and deliberately falls through above.
+_check_symmetric(A::Symmetric) = (Base.require_one_based_indexing(A); nothing)
 
 # Build the reordered matrix `Ax[a, b] = A[x[a], x[b]]` the sieve works on.
 function _permuted(::Type{T}, A::AbstractMatrix, x::Vector{Int}) where {T}
@@ -862,7 +890,7 @@ function _check_method(method::Symbol, K::Int)
 end
 
 """
-    hafnian(A; nthreads=Threads.nthreads(), glynn=true, method=:auto) -> Number
+    hafnian(A; nthreads=Threads.nthreads(), glynn=true, method=:auto, check_symmetric=true) -> Number
 
 Hafnian of the square symmetric matrix `A`: the sum over all perfect matchings of
 ``∏_{(i,j)} A[i,j]``.
@@ -885,6 +913,11 @@ overrides the choice:
 `A` is read in place: views, `Symmetric` wrappers and other `AbstractMatrix`es holding the result
 element type are never copied. Indices must be 1-based.
 
+`check_symmetric=false` skips the `O(N²)` symmetry validation, which at small `N` costs a real fraction of the
+whole call — about a third of it at `N = 8`. Pass it only when the caller already knows `A` is
+symmetric; with it, only the entries the chosen strategy happens to read are consulted, so an
+asymmetric matrix gives a silently strategy-dependent answer rather than an error.
+
 # Examples
 ```jldoctest
 julia> hafnian([0 1 2 3; 1 0 4 5; 2 4 0 6; 3 5 6 0])
@@ -899,13 +932,14 @@ function hafnian(
     nthreads::Int = nthreads(),
     glynn::Bool = true,
     method::Symbol = :auto,
+    check_symmetric::Bool = true,
 )
     N = LinearAlgebra.checksquare(A)
     T = _haf_eltype(A)
     N == 0 && return one(T)
     isodd(N) && return zero(T)
     _check_method(method, N)
-    _check_symmetric(A)
+    check_symmetric ? _check_symmetric(A) : Base.require_one_based_indexing(A)
 
     # All edge multiplicities are 1 here, so the sieve would run `2^(E-1)` terms; pricing that
     # directly avoids allocating the vector on the paths that never sieve.
@@ -941,7 +975,7 @@ end
 end
 
 """
-    hafnian_repeated(A, rpt; nthreads=Threads.nthreads(), glynn=true, method=:auto) -> Number
+    hafnian_repeated(A, rpt; nthreads=Threads.nthreads(), glynn=true, method=:auto, check_symmetric=true) -> Number
 
 Hafnian of the matrix obtained by repeating row and column `i` of `A` exactly `rpt[i]` times, i.e.
 `hafnian(reduction(A, rpt))`, but without ever forming that larger matrix.
@@ -957,7 +991,8 @@ Returns `1` when `sum(rpt) == 0` and `0` when `sum(rpt)` is odd.
 sieve cheap, so it wins here far more often than it does for distinct rows: `rpt = [6, 6]` sieves
 where `rpt = [5, 5, 1, 1]` does not, and `fill(2, 14)` sieves where 28 distinct rows would not.
 
-`A` is read in place, exactly as for [`hafnian`](@ref).
+`A` is read in place and `check_symmetric=false` skips symmetry validation, exactly as for
+[`hafnian`](@ref).
 
 # Examples
 ```jldoctest
@@ -978,6 +1013,7 @@ function hafnian_repeated(
     nthreads::Int = nthreads(),
     glynn::Bool = true,
     method::Symbol = :auto,
+    check_symmetric::Bool = true,
 )
     N = LinearAlgebra.checksquare(A)
     length(rpt) == N || throw(DimensionMismatch("rpt has length $(length(rpt)), expected $N"))
@@ -988,7 +1024,7 @@ function hafnian_repeated(
     total == 0 && return one(T)
     isodd(total) && return zero(T)
     _check_method(method, total)
-    _check_symmetric(A)
+    check_symmetric ? _check_symmetric(A) : Base.require_one_based_indexing(A)
 
     x, edge_reps = matched_reps(rpt)
     chosen = method === :auto ? _choose_method(total, edge_reps, nthreads) : method

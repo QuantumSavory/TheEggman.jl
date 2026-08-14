@@ -46,6 +46,10 @@ the fallback at large degrees and the best choice when repeated rows shrink it. 
 `glynn=false` selects the inclusion–exclusion sieve variant instead of the default Glynn one (about
 2.5× faster, about 1000× less accurate), and has no effect on the other two strategies.
 
+Matrices are read in place — views and `Symmetric` wrappers are never copied — and must be 1-based.
+Symmetry is validated on every call, which is `O(N²)` and so a noticeable fraction of the total at
+small `N`; `check_symmetric=false` skips it for callers that already know their input is symmetric.
+
 Loop hafnians are not implemented yet.
 
 ## Index

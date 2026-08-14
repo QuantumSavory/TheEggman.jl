@@ -387,6 +387,66 @@ end
         @test (@inferred hafnian_repeated(A, fill(2, 12); method = :sieve)) isa ComplexF64
     end
 
+    @testset "symmetry check: tolerance matches isapprox" begin
+        # The check compares squared magnitudes to avoid three `hypot` calls per entry pair, so its
+        # accept/reject boundary must still be exactly `isapprox`'s.
+        rng = MersenneTwister(22)
+        for T in (Float64, ComplexF64)
+            A = randsym(rng, T, 6)
+            inside = copy(A)
+            inside[2, 5] = A[5, 2] * (1 + sqrt(eps(Float64)) / 8)
+            @test isapprox(inside[2, 5], inside[5, 2])
+            @test TheEggman._check_symmetric(inside) === nothing
+
+            outside = copy(A)
+            outside[2, 5] = A[5, 2] * (1 + 8 * sqrt(eps(Float64)))
+            @test !isapprox(outside[2, 5], outside[5, 2])
+            @test_throws ArgumentError TheEggman._check_symmetric(outside)
+        end
+        # Infinities compare equal under `isapprox` and must keep doing so; NaN never does.
+        B = fill(1.0, 4, 4)
+        B[1, 2] = B[2, 1] = Inf
+        @test TheEggman._check_symmetric(B) === nothing
+        B[1, 2] = B[2, 1] = NaN
+        @test_throws ArgumentError TheEggman._check_symmetric(B)
+    end
+
+    @testset "check_symmetric=false skips validation only" begin
+        rng = MersenneTwister(23)
+        for N in (8, 12, 16)
+            A = randsym(rng, ComplexF64, N)
+            @test hafnian(A; check_symmetric = false) === hafnian(A)
+            @test hafnian_repeated(A, fill(1, N); check_symmetric = false) === hafnian_repeated(A, fill(1, N))
+        end
+        # Asymmetric input is rejected with the check on, and not consulted with it off.
+        bad = randsym(rng, ComplexF64, 8)
+        bad[1, 2] += 1
+        @test_throws ArgumentError hafnian(bad)
+        @test hafnian(bad; check_symmetric = false) isa ComplexF64
+        # With the check off only the entries the strategy reads are consulted; at this size that
+        # is the upper triangle, so the answer is the one for `bad`'s symmetrisation-from-above.
+        upper = copy(bad)
+        for j in 1:8, i in 1:j-1
+            upper[j, i] = upper[i, j]
+        end
+        @test hafnian(bad; check_symmetric = false) ≈ hafnian(upper)
+    end
+
+    @testset "Symmetric wrappers skip the check but agree" begin
+        rng = MersenneTwister(24)
+        for N in (8, 12, 16)
+            raw = randn(rng, ComplexF64, N, N)      # deliberately asymmetric storage
+            S = Symmetric(raw)
+            # `Symmetric` mirrors one triangle on read, so it is symmetric by construction and the
+            # check is skipped — but the answer must still be that of the mirrored matrix.
+            @test TheEggman._check_symmetric(S) === nothing
+            @test hafnian(S) ≈ hafnian(Matrix(S))
+            # Complex `Hermitian` is *not* symmetric and must not slip through.
+            H = Hermitian(raw)
+            @test_throws ArgumentError hafnian(H)
+        end
+    end
+
     @testset "input validation" begin
         rng = MersenneTwister(11)
         A = randsym(rng, ComplexF64, 4)

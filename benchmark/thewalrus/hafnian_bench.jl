@@ -36,7 +36,7 @@ for N in NS
     A1 = let B = randn(ComplexF64, N, N)
         B + transpose(B)
     end
-    SUITE["haf.eggman.rpt1.N=$N"] = @benchmarkable hafnian($A1)
+    SUITE["haf.eggman.rpt1.N=$N"] = @benchmarkable hafnian($A1; check_symmetric=false)
 
     # rpt=2: N/2 distinct rows, each doubled.
     d = N ÷ 2
@@ -45,7 +45,7 @@ for N in NS
         B + transpose(B)
     end
     rpt = fill(2, d)
-    SUITE["haf.eggman.rpt2.N=$N"] = @benchmarkable hafnian_repeated($A2, $rpt)
+    SUITE["haf.eggman.rpt2.N=$N"] = @benchmarkable hafnian_repeated($A2, $rpt; check_symmetric=false)
 end
 
 results = run(SUITE)

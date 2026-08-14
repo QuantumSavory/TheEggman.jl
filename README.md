@@ -22,6 +22,10 @@ B = [1.0 2.0; 2.0 3.0]
 hafnian_repeated(B, [2, 2])   # 11.0
 ```
 
+Both accept any 1-based `AbstractMatrix` and read it in place — views and `Symmetric` wrappers are
+never copied. Both validate symmetry, which is `O(N²)` and therefore a real fraction of the cost at
+small `N`; pass `check_symmetric=false` in a hot loop where the input is known to be symmetric.
+
 Loop hafnians are not implemented yet.
 
 ## Algorithm
@@ -97,16 +101,18 @@ virtualenv, and writes a comparison plot to a timestamped directory under `.benc
 [`benchmark/thewalrus/README.md`](benchmark/thewalrus/README.md) for details and for how to run the
 stages individually.
 
-On a 12-thread i7-1365U, median speedup over `thewalrus` at total degree `N`:
+On a 12-thread i7-1365U, mean speedup over `thewalrus` at total degree `N`:
 
 | N  | `hafnian` (distinct rows) | `hafnian_repeated` (rpt = 2) |
 |----|---------------------------|------------------------------|
-| 8  | 388x                      | 418x                         |
-| 12 | 138x                      | 72x                          |
-| 16 | 67x                       | 19x                          |
-| 20 | 54x                       | 21x                          |
-| 24 | 92x                       | 15x                          |
-| 28 | 72x                       | 13x                          |
+| 8  | 1604x                     | 596x                         |
+| 12 | 190x                      | 61x                          |
+| 16 | 71x                       | 16x                          |
+| 20 | 41x                       | 16x                          |
+| 24 | 26x                       | 13x                          |
+| 28 | 45x                       | 7x                           |
+
+![Benchmarks comparing Hafnian performance of TheEggman.jl to thewalrus.](assets/images/thewalrus_benchmark_comparison.svg)
 
 The `hafnian` column is unrolled at N=8/12 and DP above; the `hafnian_repeated` column falls back to
 the sieve from N=20 on, where repetition has made it the cheapest option, so those entries are
