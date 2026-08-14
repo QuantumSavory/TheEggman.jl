@@ -1,3 +1,6 @@
 [deps]
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 TheEggman = "d2b1023c-e65d-4dc8-8fde-b4ef6c929f77"
+
+[compat]
+Documenter = "1.17.0"
