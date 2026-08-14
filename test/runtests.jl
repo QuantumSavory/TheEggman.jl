@@ -26,6 +26,17 @@ end
 
 randsym(rng, T, n) = (B = randn(rng, T, n, n); B + transpose(B))
 
+"""
+Allocations of one `f(args...)` call, after a warmup and behind a function barrier.
+
+The barrier matters: measuring `@allocated f(container[k])` instead would count the boxing of the
+result caused by the *test's* own dynamic dispatch, not anything `f` did.
+"""
+function alloc_of(f, args...)
+    f(args...)
+    return @allocated f(args...)
+end
+
 """Count `*` calls anywhere in an expression tree."""
 count_muls(x) = 0
 function count_muls(e::Expr)
@@ -325,6 +336,55 @@ end
         @test hafnian_repeated(A, [1, 0, 0, 0]) == 0     # odd total
         @test hafnian_repeated(A, [3, 1, 1, 0]) ≈ brute_hafnian(reduction(A, [3, 1, 1, 0]))
         @test hafnian_repeated(A, [2, 0, 0, 0]) ≈ A[1, 1]
+    end
+
+    @testset "views and wrappers cost nothing extra" begin
+        rng = MersenneTwister(19)
+        for N in (8, 12, 16, 20)
+            F = randsym(rng, ComplexF64, 2N + 4)
+            A = Matrix(F[1:N, 1:N])
+            rpt = fill(1, N)
+            base = hafnian(A)
+            base_alloc = alloc_of(hafnian, A)
+            base_alloc_rep = alloc_of(hafnian_repeated, A, rpt)
+
+            for W in (view(F, 1:N, 1:N), view(F, 3:N+2, 3:N+2), view(F, 1:2:2N, 1:2:2N), Symmetric(A))
+                @test hafnian(W) ≈ hafnian(Matrix(W))
+                # Wrapping must not make the algorithm copy the matrix. Comparing against the
+                # `Matrix` case rather than a fixed number keeps this robust to whatever the
+                # chosen strategy legitimately allocates for itself.
+                @test alloc_of(hafnian, W) == base_alloc
+                @test hafnian_repeated(W, rpt) ≈ hafnian_repeated(Matrix(W), rpt)
+                @test alloc_of(hafnian_repeated, W, rpt) == base_alloc_rep
+            end
+        end
+    end
+
+    @testset "unrolled path allocates nothing" begin
+        rng = MersenneTwister(20)
+        for N in 2:2:TheEggman.UNROLL_MAX
+            A = randsym(rng, ComplexF64, N)
+            @test alloc_of(hafnian, A) == 0
+            @test alloc_of(hafnian, view(A, 1:N, 1:N)) == 0
+        end
+    end
+
+    @testset "return type is inferrable" begin
+        # A `Union{Val{true},Val{false}}` reaching the sieve once made this `Any`, which propagates
+        # into every caller and boxes the result.
+        rng = MersenneTwister(21)
+        A = randsym(rng, ComplexF64, 12)
+        R = randsym(rng, Float64, 12)
+        I8 = round.(Int, 10 .* R)
+        @test (@inferred hafnian(A)) isa ComplexF64
+        @test (@inferred hafnian(view(A, 1:12, 1:12))) isa ComplexF64
+        @test (@inferred hafnian(Symmetric(A))) isa ComplexF64
+        @test (@inferred hafnian(I8)) isa Float64
+        @test (@inferred hafnian(A; method = :sieve)) isa ComplexF64
+        @test (@inferred hafnian(A; method = :sieve, glynn = false)) isa ComplexF64
+        @test (@inferred hafnian(A; method = :dp)) isa ComplexF64
+        @test (@inferred hafnian_repeated(A, fill(1, 12))) isa ComplexF64
+        @test (@inferred hafnian_repeated(A, fill(2, 12); method = :sieve)) isa ComplexF64
     end
 
     @testset "input validation" begin

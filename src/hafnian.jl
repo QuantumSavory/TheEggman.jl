@@ -674,18 +674,38 @@ function _calc_hafnian(
 
     nchunks = _sieve_chunks(steps, E, n, nthreads)
 
-    gv = glynn ? Val(true) : Val(false)
+    # Branch here rather than computing `glynn ? Val(true) : Val(false)`: that would be a
+    # `Union{Val{true},Val{false}}`, which makes the sieve call a dynamic dispatch and leaves the
+    # whole return type uninferrable all the way out through `hafnian`.
+    return if glynn
+        _sieve_sum(Ax, edge_reps, n, steps, binoms, nchunks, Val(true))
+    else
+        _sieve_sum(Ax, edge_reps, n, steps, binoms, nchunks, Val(false))
+    end
+end
+
+# Sum the sieve, with `glynn` a compile-time constant so the final rescaling folds away.
+function _sieve_sum(
+    Ax::Matrix{T},
+    edge_reps::Vector{Int},
+    n::Int,
+    steps::Int,
+    binoms::Matrix{R},
+    nchunks::Int,
+    ::Val{glynn},
+) where {T,R,glynn}
+    E = length(edge_reps)
     H = if nchunks == 1
-        _haf_range(HafnianWorkspace{T}(E, n), Ax, edge_reps, n, 0, steps - 1, binoms, gv)
+        _haf_range(HafnianWorkspace{T}(E, n), Ax, edge_reps, n, 0, steps - 1, binoms, Val(glynn))
     else
         tasks = map(1:nchunks) do c
             lo = div((c - 1) * steps, nchunks)
             hi = div(c * steps, nchunks) - 1
-            @spawn _haf_range(HafnianWorkspace{T}(E, n), Ax, edge_reps, n, lo, hi, binoms, gv)
+            @spawn _haf_range(HafnianWorkspace{T}(E, n), Ax, edge_reps, n, lo, hi, binoms, Val(glynn))
         end
-        sum(fetch, tasks)
+        # `fetch` is untyped, so annotate rather than let the sum widen to `Any`.
+        sum(t -> fetch(t)::T, tasks)
     end
-
     return glynn ? H * R(0.5)^(n - 1) : H
 end
 
@@ -696,6 +716,9 @@ end
 _haf_eltype(A::AbstractMatrix) = float(eltype(A))
 
 function _check_symmetric(A::AbstractMatrix)
+    # Every index in this package is 1-based, and the kernels read `A` under `@inbounds`, so an
+    # offset array would silently read out of bounds rather than merely give a wrong answer.
+    Base.require_one_based_indexing(A)
     n = size(A, 1)
     for j in 1:n, i in 1:j-1
         isapprox(A[i, j], A[j, i]) || throw(ArgumentError("matrix is not symmetric at ($i, $j)"))
@@ -712,9 +735,22 @@ function _permuted(::Type{T}, A::AbstractMatrix, x::Vector{Int}) where {T}
     return M
 end
 
-# The unrolled kernels index with `@inbounds` and assume 1-based axes, so hand them a plain Matrix.
-# For the common case (`A` already `Matrix{T}`) this is free.
-_as_matrix(::Type{T}, A::AbstractMatrix) where {T} = A isa Matrix{T} ? A : Matrix{T}(A)
+"""
+    _kernel_matrix(T, A) -> AbstractMatrix
+
+The array the direct kernels should read, promoted to `T` only if it is not already that element
+type.
+
+Anything already holding `T` is handed through untouched — in particular views, which the kernels
+index perfectly well and which must not be silently copied. Only a genuine element-type change
+materialises anything, and there it is unavoidable: computing an integer matrix's hafnian in `Int`
+and converting at the end would overflow where the promoted arithmetic does not.
+
+Dispatching on the element type rather than branching keeps the result concretely typed at every
+call site, so no dynamic dispatch leaks into the kernels.
+"""
+_kernel_matrix(::Type{T}, A::AbstractMatrix{T}) where {T} = A
+_kernel_matrix(::Type{T}, A::AbstractMatrix) where {T} = Matrix{T}(A)
 
 """
     _prefer_unrolled(K, sieve_work) -> Bool
@@ -769,8 +805,19 @@ call is made repeatedly with GC time counted the unrolled kernel is ahead again 
 """
 function _choose_method(K::Int, edge_reps::Vector{Int}, nthreads::Int)
     isempty(edge_reps) && return :sieve
-    work = _sieve_work(edge_reps)
-    nchunks = _sieve_chunks(_sieve_steps(edge_reps), length(edge_reps), sum(edge_reps), nthreads)
+    return _choose_method(K, _sieve_steps(edge_reps), length(edge_reps), sum(edge_reps), nthreads)
+end
+
+"""
+    _choose_method(K, steps, E, n, nthreads) -> Symbol
+
+As above, but taking the sieve's shape directly. [`hafnian`](@ref) knows its edge multiplicities are
+all `1` and so can price the alternatives without materialising a vector of them, which is what
+keeps the unrolled path allocation-free.
+"""
+function _choose_method(K::Int, steps::Int, E::Int, n::Int, nthreads::Int)
+    work = steps * _term_cost(E, n)
+    nchunks = _sieve_chunks(steps, E, n, nthreads)
     effective = work ÷ max(nchunks, 1)
     _prefer_unrolled(K, effective) && return :unrolled
     _prefer_dp(K, work, nchunks) && return :dp
@@ -793,10 +840,10 @@ function _haf_direct_method(
     ::Type{T},
     method::Symbol,
     A::AbstractMatrix,
-    idx::Vector{Int},
+    idx::AbstractVector{Int},
     nthreads::Int,
 ) where {T}
-    Am = _as_matrix(T, A)
+    Am = _kernel_matrix(T, A)
     if method === :unrolled
         return T(_haf_direct(Am, idx))
     else
@@ -835,6 +882,9 @@ overrides the choice:
 
 `glynn` selects the sieve variant and has no effect on the other two.
 
+`A` is read in place: views, `Symmetric` wrappers and other `AbstractMatrix`es holding the result
+element type are never copied. Indices must be 1-based.
+
 # Examples
 ```jldoctest
 julia> hafnian([0 1 2 3; 1 0 4 5; 2 4 0 6; 3 5 6 0])
@@ -857,14 +907,16 @@ function hafnian(
     _check_method(method, N)
     _check_symmetric(A)
 
+    # All edge multiplicities are 1 here, so the sieve would run `2^(E-1)` terms; pricing that
+    # directly avoids allocating the vector on the paths that never sieve.
     E = N ÷ 2
-    edge_reps = ones(Int, E)
-    chosen = method === :auto ? _choose_method(N, edge_reps, nthreads) : method
+    chosen = method === :auto ? _choose_method(N, 1 << (E - 1), E, E, nthreads) : method
     if chosen === :unrolled
         # Distinct rows in their natural order, so no index vector needs materialising.
-        return T(_haf_unrolled_range(_as_matrix(T, A), N))
+        return T(_haf_unrolled_range(_kernel_matrix(T, A), N))
     elseif chosen === :dp
-        return _haf_direct_method(T, :dp, A, collect(1:N), nthreads)
+        # `1:N` rather than a materialised vector: the kernels only ever index it.
+        return _haf_direct_method(T, :dp, A, Base.OneTo(N), nthreads)
     end
 
     # Match vertex 2i-1 with 2i, then reorder into the [first halves; second halves] layout.
@@ -873,7 +925,7 @@ function hafnian(
         x[i] = 2i - 1
         x[E+i] = 2i
     end
-    return _calc_hafnian(_permuted(T, A, x), edge_reps; nthreads, glynn)
+    return _calc_hafnian(_permuted(T, A, x), ones(Int, E); nthreads, glynn)
 end
 
 # hafnian(A) on the full index range 1:N — no index vector needs materialising.
@@ -904,6 +956,8 @@ Returns `1` when `sum(rpt) == 0` and `0` when `sum(rpt)` is odd.
 `method` selects among the same three strategies as [`hafnian`](@ref). Repetition is what makes the
 sieve cheap, so it wins here far more often than it does for distinct rows: `rpt = [6, 6]` sieves
 where `rpt = [5, 5, 1, 1]` does not, and `fill(2, 14)` sieves where 28 distinct rows would not.
+
+`A` is read in place, exactly as for [`hafnian`](@ref).
 
 # Examples
 ```jldoctest
