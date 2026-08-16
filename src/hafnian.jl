@@ -874,8 +874,14 @@ function _haf_direct_method(
     Am = _kernel_matrix(T, A)
     if method === :unrolled
         return T(_haf_direct(Am, idx))
+    end
+    # Branch on the plan layout so each call is concretely typed; a single `_dp_plan(K)` would be
+    # abstractly typed and cost an inferrable return type. See `_dp_index_type`.
+    K = length(idx)
+    if K <= DP_MAX
+        return T(_haf_dp(Am, idx, _dp_plan(K, Int32); nthreads))
     else
-        return T(_haf_dp(Am, idx, _dp_plan(length(idx)); nthreads))
+        return T(_haf_dp(Am, idx, _dp_plan(K, Int64); nthreads))
     end
 end
 
@@ -884,8 +890,8 @@ function _check_method(method::Symbol, K::Int)
         throw(ArgumentError("method must be :auto, :unrolled, :dp or :sieve, got :$method"))
     method === :unrolled && K > UNROLL_MAX &&
         throw(ArgumentError("method=:unrolled needs degree ≤ $UNROLL_MAX, got $K"))
-    method === :dp && K > DP_MAX &&
-        throw(ArgumentError("method=:dp needs degree ≤ $DP_MAX, got $K"))
+    method === :dp && K > DP_HARD_MAX &&
+        throw(ArgumentError("method=:dp needs degree ≤ $DP_HARD_MAX, got $K"))
     return nothing
 end
 
@@ -902,8 +908,10 @@ Three strategies compute this, chosen automatically by comparing their known cos
 overrides the choice:
 
   * `:unrolled` — the matching sum emitted as straight-line code, for degrees up to `UNROLL_MAX`.
-  * `:dp` — the same recursion evaluated over memoised subsets, for degrees up to `DP_MAX`. Usually
-    the fastest option in between, by a wide margin.
+  * `:dp` — the same recursion evaluated over memoised subsets. Usually the fastest option in
+    between, by a wide margin. Chosen automatically up to `DP_MAX`; requesting it explicitly goes
+    up to `DP_HARD_MAX` on a wider layout, which stays faster than the sieve but needs a plan
+    measured in gigabytes (see [`DP_HARD_MAX`](@ref)).
   * `:sieve` — the ``O(n³ 2ⁿ)`` Björklund/Glynn sieve, parallelised over `nthreads` tasks when the
     problem is large enough to pay for them. The fallback above `DP_MAX`, and the best choice when
     repeated rows shrink it far enough.

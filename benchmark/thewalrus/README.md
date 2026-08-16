@@ -5,7 +5,7 @@ Compares TheEggman.jl's `hafnian` / `hafnian_repeated` against
 
 thewalrus always runs the Björklund/Glynn `O(N^3 2^(N/2))` finite-difference sieve
 ([arXiv:2108.01622](https://arxiv.org/abs/2108.01622)). TheEggman.jl chooses per problem between an
-unrolled matching sum (N ≤ 12), a subset DP (N ≤ 28) and the same sieve, so most groups in this
+unrolled matching sum (N ≤ 12), a subset DP (N ≤ 32) and the same sieve, so most groups in this
 sweep compare *different algorithms* rather than two implementations of one. The exception is the
 rpt=2 panel from N=20 on, where repetition has made the sieve the cheapest option for both libraries
 and the comparison is sieve-vs-sieve.

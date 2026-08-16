@@ -191,10 +191,34 @@ end
         end
     end
 
+    @testset "DP_MAX is exactly the packing limit" begin
+        # `DP_MAX` is set by the packed-Int32 transition, not by the sieve catching up, so assert
+        # that boundary directly — cheaply, from the closed-form counts rather than by building the
+        # 196 MB plan.
+        bits(x) = ndigits(x, base = 2)
+        K = TheEggman.DP_MAX
+        ns, _ = TheEggman._dp_counts(K)
+        npairs = K * (K - 1) ÷ 2
+        @test npairs <= TheEggman._pair_mask(Int32)
+        @test ns <= typemax(Int32) >> TheEggman._pair_bits(Int32)
+        @test bits(npairs) + bits(ns) <= 31
+
+        # The next even degree overflows an Int32 transition under *any* split of the bits, which
+        # is what makes this the cap rather than a tunable.
+        ns2, _ = TheEggman._dp_counts(K + 2)
+        npairs2 = (K + 2) * (K + 1) ÷ 2
+        @test bits(npairs2) + bits(ns2) > 31
+    end
+
     @testset "DP plan structure" begin
-        for K in (4, 8, 12, 16)
-            plan = TheEggman._dp_plan(K)
+        # Both layouts must satisfy the same invariants; only the packing width differs.
+        for I in (Int32, Int64), K in (4, 8, 12, 16)
+            plan = TheEggman._dp_plan(K, I)
             nstates, ntrans = TheEggman._dp_counts(K)
+            @test plan isa TheEggman.HafnianDPPlan{I}
+            @test eltype(plan.trans) === I
+            @test eltype(plan.starts) === I
+            @test eltype(plan.levels) === I
             # The closed-form counts drive the strategy choice before any plan exists, so they must
             # match what enumeration actually produces.
             @test plan.nstates == nstates
@@ -203,14 +227,46 @@ end
             @test plan.starts[end] == ntrans + 1
             @test issorted(plan.starts)
             # A single forward pass is only valid if every state's children precede it.
-            children(s) = plan.trans[plan.starts[s]:plan.starts[s+1]-1] .>> TheEggman._DP_PAIR_BITS
+            children(s) = plan.trans[plan.starts[s]:plan.starts[s+1]-1] .>> TheEggman._pair_bits(I)
             @test all(s -> all(children(s) .< s), 2:nstates)
             # State 1 is the empty set (no transitions) and the last state is the full set.
             @test plan.starts[2] == 1
             @test plan.starts[nstates+1] - plan.starts[nstates] == K - 1
-            @test all(1 .<= (plan.trans .& TheEggman._DP_PAIR_MASK) .<= K * (K - 1) ÷ 2)
+            @test all(1 .<= (plan.trans .& TheEggman._pair_mask(I)) .<= K * (K - 1) ÷ 2)
         end
         @test TheEggman._dp_plan(8) === TheEggman._dp_plan(8)   # cached, not rebuilt
+        @test TheEggman._dp_plan(8, Int32) !== TheEggman._dp_plan(8, Int64)  # separate caches
+    end
+
+    @testset "wide Int64 plans" begin
+        # The wide layout exists for degrees past `DP_MAX`, where a transition no longer fits an
+        # Int32. Its arithmetic must be identical to the narrow one, which is checkable at a small
+        # degree where building both is cheap.
+        rng = MersenneTwister(25)
+        for K in (8, 12, 16)
+            A = randsym(rng, ComplexF64, K)
+            idx = collect(1:K)
+            v32 = TheEggman._haf_dp(A, idx, TheEggman._dp_plan(K, Int32))
+            v64 = TheEggman._haf_dp(A, idx, TheEggman._dp_plan(K, Int64))
+            @test v32 === v64
+            @test v32 ≈ hafnian(A; method = :sieve) rtol = 1e-10
+        end
+
+        # Layout is chosen by degree, and the wide one is never selected automatically.
+        @test TheEggman._dp_index_type(TheEggman.DP_MAX) === Int32
+        @test TheEggman._dp_index_type(TheEggman.DP_MAX + 2) === Int64
+        @test TheEggman._choose_method(34, ones(Int, 17), 12) === :sieve
+        @test !TheEggman._prefer_dp(34, typemax(Int), 1)
+
+        # ...but asking for it explicitly is allowed, right up to the bitmask width.
+        @test TheEggman._check_method(:dp, TheEggman.DP_HARD_MAX) === nothing
+        @test_throws ArgumentError TheEggman._check_method(:dp, TheEggman.DP_HARD_MAX + 2)
+
+        # A plan too large to represent, or to fit in memory, is refused up front rather than
+        # attempted — the guards run off the closed-form counts, so this builds nothing.
+        @test_throws ArgumentError TheEggman._build_dp_plan(TheEggman.DP_HARD_MAX + 2, Int64)
+        @test_throws ArgumentError TheEggman._build_dp_plan(50, Int64)
+        @test_throws ArgumentError TheEggman._build_dp_plan(34, Int32)   # will not pack
     end
 
     @testset "DP threading is exact and level-safe" begin
@@ -253,7 +309,8 @@ end
         @test TheEggman._choose_method(12, ones(Int, 6), 12) === :unrolled
         @test TheEggman._choose_method(20, ones(Int, 10), 12) === :dp
         @test TheEggman._choose_method(28, ones(Int, 14), 12) === :dp
-        @test TheEggman._choose_method(32, ones(Int, 16), 12) === :sieve   # past DP_MAX
+        @test TheEggman._choose_method(32, ones(Int, 16), 12) === :dp
+        @test TheEggman._choose_method(34, ones(Int, 17), 12) === :sieve   # past DP_MAX
         # Repetition is what makes the sieve cheap, so it takes over as reps grow.
         @test TheEggman._choose_method(28, TheEggman.matched_reps(fill(2, 14))[2], 12) === :sieve
         @test TheEggman._choose_method(16, TheEggman.matched_reps(fill(2, 8))[2], 12) === :dp
@@ -261,7 +318,9 @@ end
         A = randsym(MersenneTwister(16), ComplexF64, 16)
         @test_throws ArgumentError hafnian(A; method = :unrolled)
         @test_throws ArgumentError hafnian(A; method = :nonsense)
-        @test_throws ArgumentError hafnian(randsym(MersenneTwister(17), ComplexF64, 32); method = :dp)
+        # Past DP_HARD_MAX nothing can be built; below it `:dp` is allowed but would cost gigabytes,
+        # so this deliberately probes the rejected side only.
+        @test_throws ArgumentError hafnian(randsym(MersenneTwister(17), ComplexF64, 66); method = :dp)
     end
 
     @testset "unrolled crossover picks the faster path" begin

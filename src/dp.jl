@@ -30,10 +30,10 @@ That is *worse* asymptotically than the sieve's `2^{K/2} K³ ≈ 1.414^K K³` �
 around `K ≈ 105` — but across the entire range that is actually computable, the sieve does 65–100×
 more arithmetic:
 
-| K              | 12  | 16   | 20    | 24     | 28      |
-|----------------|-----|------|-------|--------|---------|
-| DP transitions | 1076| 10226| 89665 | 748776 | 6052062 |
-| sieve work     | 106k| 1.0M | 7.9M  | 54M    | 393M    |
+| K              | 12  | 16   | 20    | 24     | 28      | 32       |
+|----------------|-----|------|-------|--------|---------|----------|
+| DP transitions | 1076| 10226| 89665 | 748776 | 6052062 | 47786401 |
+| sieve work     | 106k| 1.0M | 7.9M  | 54M    | 393M    | 2.1G     |
 
 # Making the transitions cheap
 
@@ -51,9 +51,11 @@ outright.
 # Limits
 
 Plans cost memory (4 bytes per transition) and time to build, both growing like `φ^K`: 0.4 MB and
-3 ms at `K = 20`, 24 MB and 250 ms at `K = 28`. They are cached for the lifetime of the session, so
-the build is amortised across calls, but `DP_MAX` caps the degree to keep a single plan from running
-away. Above it, [`hafnian`](@ref) falls back to the sieve, whose memory is negligible.
+3 ms at `K = 20`, 25 MB and 0.2 s at `K = 28`, 196 MB and 2.1 s at `K = 32`. They are cached for the
+lifetime of the session, so the build is amortised across calls. `DP_MAX` caps the degree — not
+because the sieve catches up there (it does not; see [`DP_MAX`](@ref)) but because a transition
+stops fitting in an `Int32` above it. Past that, [`hafnian`](@ref) falls back to the sieve, whose
+memory is negligible.
 
 Accuracy is that of the definition — the DP sums products of matrix entries with no cancellation
 between large signed terms, so it is more accurate than either sieve variant.
@@ -62,10 +64,63 @@ between large signed terms, so it is more accurate than either sieve variant.
 using Base.Threads: ReentrantLock, @spawn
 
 """
-Largest total degree for which a DP plan will be built. Set by plan size — `K = 28` needs 24 MB and
-about 250 ms to construct, and the next even degree would need roughly 2.9× both.
+Largest total degree for which a DP plan will be built.
+
+This is a *representation* limit, not a performance crossover. The sieve never overtakes the DP
+anywhere reachable — measured on 12 threads, the DP is still 9.6× ahead at `K = 32`:
+
+| K              | 24   | 26   | 28   | 30   | 32    |
+|----------------|------|------|------|------|-------|
+| DP (ms)        | 0.16 | 0.40 | 1.06 | 4.19 | 11.34 |
+| sieve (ms)     | 2.88 | 11.0 | 19.3 | 45.1 | 108.7 |
+| plan (MB)      | 3.1  | 8.9  | 25.0 | 70.2 | 195.7 |
+| plan build (s) | 0.02 | 0.05 | 0.20 | 0.64 | 2.13  |
+
+The DP's advantage does shrink — its states grow like `φ^K ≈ 1.618^K` against the sieve's
+`1.414^K K³`, costing about 13% of the ratio per two degrees — but extrapolating the measured times
+puts parity near `K ≈ 60`, far past anything either method could hold in memory.
+
+What actually binds is the packed `Int32` transition (see [`_pair_bits`](@ref)): at `K = 32` it needs
+9 bits of pair index plus 22 of state index, exactly the 31 available. `K = 34` needs 10 + 24 = 34
+bits, so it cannot be packed into an `Int32` under any split.
+
+Above this the DP is still the faster algorithm, but a plan stops being something to build casually
+— 1 GB at `K = 34`, 21 GB at `K = 40` — so it is never chosen automatically. `method = :dp` opts in
+explicitly and switches to the wide `Int64` layout; see [`DP_HARD_MAX`](@ref).
+
+Plans are cached for the session, so their build cost is amortised — but a *single* cold call at
+`K = 32` pays 2.13 s of construction to save 0.10 s of evaluation, and only comes out ahead after
+about 22 calls (11 at `K = 28`, 16 at `K = 30`). Pass `method = :sieve` for one-shot large hafnians.
 """
-const DP_MAX = 28
+const DP_MAX = 32
+
+"""
+Largest degree at which `method = :dp` will build a plan at all.
+
+Past [`DP_MAX`](@ref) the DP is still the faster algorithm — it is memory, not the sieve, that
+stops it — so explicitly requesting `:dp` is allowed well beyond the automatic cap, for machines
+where that memory exists. Those plans use the wide `Int64` layout (see [`_dp_index_type`](@ref)).
+
+The cap itself is where the *representation* runs out: subsets are enumerated as bitmasks, and a
+`UInt64` holds 64 of them. Everything else has headroom at that point — the packed transition needs
+44 + 12 = 56 of its 63 bits at `K = 64`.
+
+It stays worth it: at `K = 34`, measured on 12 threads, the DP runs in 56.5 ms against the sieve's
+249.9 ms — 4.4× — off a 1.06 GB plan that takes 6.5 s to build once.
+
+Memory is what will actually stop you, long before. Plan size, and the per-call state array:
+
+| K            | 34   | 38   | 40   | 44    | 46    | 50     |
+|--------------|------|------|------|-------|-------|--------|
+| plan         | 1 GB | 8 GB | 21 GB| 160 GB| 439 GB| 3.3 TB |
+| state array  | 0.1  | 0.9  | 2.5  | 17    | 44    | 303 GB |
+
+Building transiently needs about twice the plan — the mask set and index map are live at the same
+time as the finished arrays — and each concurrent call needs its own state array on top.
+[`_build_dp_plan`](@ref) refuses up front, with the projected size, rather than letting the
+allocation take the machine down.
+"""
+const DP_HARD_MAX = 64
 
 """
     HafnianDPPlan
@@ -78,28 +133,50 @@ are stored in CSR form: state `s` owns `starts[s]:starts[s+1]-1`, and entry `k` 
 `P[pair[k]] * H[child[k]]`, where `P` holds the flattened upper triangle of the gathered matrix (see
 [`_pair_index`](@ref)).
 
-Each transition is one packed `Int32`: the target state in the high bits and the matrix-entry index
-in the low `_DP_PAIR_BITS`. The evaluation loop is memory-bound on this array — 24 MB of it at
+Each transition is one packed integer `I`: the target state in the high bits and the matrix-entry
+index in the low `_pair_bits(I)`. The evaluation loop is memory-bound on this array — 24 MB of it at
 `K = 28` — so packing the two indices together rather than storing parallel arrays halves its
 traffic, which is worth far more than the shift and mask it costs to unpack.
+
+`I` is `Int32` up to [`DP_MAX`](@ref) and `Int64` above, which also widens `starts` and `levels`:
+past `K = 40` a plan has more than `typemax(Int32)` transitions, and past `K = 46` more than that
+many states. See [`_dp_index_type`](@ref).
 
 `levels` records where each subset size begins, so `levels[L]:levels[L+1]-1` are the states of one
 size. Every transition out of such a state lands two sizes below, so states within a level are
 mutually independent and can be evaluated in parallel — see [`_haf_dp`](@ref).
 """
-struct HafnianDPPlan
+struct HafnianDPPlan{I<:Signed}
     K::Int
     nstates::Int
-    starts::Vector{Int32}
-    trans::Vector{Int32}
-    levels::Vector{Int32}
+    starts::Vector{I}
+    trans::Vector{I}
+    levels::Vector{I}
 end
 
-# A packed transition is `(child << _DP_PAIR_BITS) | pair`. At `DP_MAX = 28` the pair index reaches
-# 378 (9 bits) and the state index 514229 (20 bits), so both fit in an Int32 with room to spare;
-# `_build_dp_plan` asserts this rather than trusting it.
-const _DP_PAIR_BITS = 9
-const _DP_PAIR_MASK = Int32(1 << _DP_PAIR_BITS - 1)
+"""
+    _pair_bits(I) -> Int
+
+Bits reserved for the matrix-entry index in a transition packed into `I`.
+
+Nine is exactly enough for the 496 pairs at `DP_MAX`, and leaves the 22 an `Int32` state index needs
+there. The wide layout spends twelve — more than the 2016 pairs at [`DP_HARD_MAX`](@ref) require —
+because with 51 bits left for the state index there is nothing to gain by being tighter.
+
+Dispatching on the type rather than storing this per plan keeps the shift and mask compile-time
+constants inside [`_dp_states!`](@ref).
+"""
+_pair_bits(::Type{Int32}) = 9
+_pair_bits(::Type{Int64}) = 12
+@inline _pair_mask(::Type{I}) where {I} = I(1) << _pair_bits(I) - I(1)
+
+"""
+    _dp_index_type(K) -> Type
+
+Integer type for a degree-`K` plan's transitions and offsets: `Int32` through [`DP_MAX`](@ref),
+`Int64` above, where neither the packed transition nor the offsets would still fit.
+"""
+_dp_index_type(K::Int) = K <= DP_MAX ? Int32 : Int64
 
 """
     _dp_counts(K) -> (nstates, ntransitions)
@@ -130,28 +207,57 @@ function _dp_counts(K::Int)
 end
 
 """
-    _build_dp_plan(K) -> HafnianDPPlan
+    _build_dp_plan(K, I = _dp_index_type(K)) -> HafnianDPPlan{I}
 
 Enumerate the reachable subsets for degree `K` and lay out their transitions.
 
 Walks the recursion from the full set, sorts the subsets by size (then by mask, for determinism),
 and rewrites every transition in terms of the resulting state numbering. The `Dict` used for that
 rewrite lives only as long as the build.
+
+Masks are `UInt32` where they fit and `UInt64` beyond, independently of `I`, so that the dominant
+build-time structures stay narrow at the sizes that are actually common. Refuses up front if the
+plan cannot be represented, or if it would not fit in physical memory.
 """
-function _build_dp_plan(K::Int)
-    full = UInt32((1 << K) - 1)
-    reached = Set{UInt32}([full])
-    stack = UInt32[full]
+function _build_dp_plan(K::Int, ::Type{I} = _dp_index_type(K)) where {I<:Signed}
+    K <= DP_HARD_MAX ||
+        throw(ArgumentError("degree $K exceeds DP_HARD_MAX = $DP_HARD_MAX; subsets are enumerated " *
+                            "as bitmasks and a UInt64 holds only $DP_HARD_MAX of them"))
+    nstates, ntrans = _dp_counts(K)
+    npairs = K * (K - 1) ÷ 2
+    npairs <= _pair_mask(I) ||
+        throw(ArgumentError("degree $K needs more than $(_pair_bits(I)) bits per pair index in $I"))
+    nstates <= (typemax(I) >> _pair_bits(I)) ||
+        throw(ArgumentError("degree $K has too many states to pack into an $I transition"))
+    ntrans <= typemax(I) ||
+        throw(ArgumentError("degree $K has too many transitions to index with $I"))
+
+    # The mask set and index map live alongside the finished arrays, so the build peaks near twice
+    # the plan: measured 1.88 GB resident for the 1.06 GB plan at `K = 34`. Checking the plan size
+    # alone would wave through builds that then run the machine out of memory.
+    bytes = (ntrans + nstates + 1) * sizeof(I)
+    2 * bytes < Sys.total_memory() ||
+        throw(ArgumentError("a degree-$K plan needs $(round(bytes / 2^30, digits = 1)) GB, and " *
+                            "about twice that while building — more than this machine has; use " *
+                            "method = :sieve"))
+
+    return K <= 32 ? _build_dp_plan(K, UInt32, I) : _build_dp_plan(K, UInt64, I)
+end
+
+function _build_dp_plan(K::Int, ::Type{M}, ::Type{I}) where {M<:Unsigned,I<:Signed}
+    full = ~M(0) >> (8 * sizeof(M) - K)     # `M(1) << K` would be undefined at the full width
+    reached = Set{M}([full])
+    stack = M[full]
     while !isempty(stack)
         m = pop!(stack)
         m == 0 && continue
         i = trailing_zeros(m) + 1
-        rest = m & ~(UInt32(1) << (i - 1))
+        rest = m & ~(M(1) << (i - 1))
         r = rest
         while r != 0
             j = trailing_zeros(r) + 1
-            r &= ~(UInt32(1) << (j - 1))
-            sub = rest & ~(UInt32(1) << (j - 1))
+            r &= ~(M(1) << (j - 1))
+            sub = rest & ~(M(1) << (j - 1))
             if !(sub in reached)
                 push!(reached, sub)
                 push!(stack, sub)
@@ -162,76 +268,93 @@ function _build_dp_plan(K::Int)
     masks = collect(reached)
     sort!(masks; by = m -> (count_ones(m), m))
     nstates = length(masks)
-    number = Dict{UInt32,Int32}(m => Int32(s) for (s, m) in enumerate(masks))
+    number = Dict{M,I}(m => I(s) for (s, m) in enumerate(masks))
 
     _, ntrans = _dp_counts(K)
-    npairs = K * (K - 1) ÷ 2
-    npairs <= _DP_PAIR_MASK || error("degree $K needs more than $_DP_PAIR_BITS bits per pair index")
-    nstates <= (typemax(Int32) >> _DP_PAIR_BITS) ||
-        error("degree $K has too many states to pack into an Int32 transition")
-
-    starts = Vector{Int32}(undef, nstates + 1)
-    trans = Vector{Int32}(undef, ntrans)
+    bits = _pair_bits(I)
+    starts = Vector{I}(undef, nstates + 1)
+    trans = Vector{I}(undef, ntrans)
 
     n = 0
     starts[1] = 1
     for (s, m) in enumerate(masks)
         if m != 0
             i = trailing_zeros(m) + 1
-            rest = m & ~(UInt32(1) << (i - 1))
+            rest = m & ~(M(1) << (i - 1))
             r = rest
             while r != 0
                 j = trailing_zeros(r) + 1
-                r &= ~(UInt32(1) << (j - 1))
+                r &= ~(M(1) << (j - 1))
                 n += 1
-                c = number[rest&~(UInt32(1)<<(j-1))]
-                trans[n] = (c << _DP_PAIR_BITS) | Int32(_pair_index(i, j, K))
+                c = number[rest&~(M(1)<<(j-1))]
+                trans[n] = (c << bits) | I(_pair_index(i, j, K))
             end
         end
-        starts[s+1] = Int32(n + 1)
+        starts[s+1] = I(n + 1)
     end
 
-    levels = Int32[1]
+    levels = I[1]
     for s in 2:nstates
-        count_ones(masks[s]) != count_ones(masks[s-1]) && push!(levels, Int32(s))
+        count_ones(masks[s]) != count_ones(masks[s-1]) && push!(levels, I(s))
     end
-    push!(levels, Int32(nstates + 1))
+    push!(levels, I(nstates + 1))
 
-    return HafnianDPPlan(K, nstates, starts, trans, levels)
+    return HafnianDPPlan{I}(K, nstates, starts, trans, levels)
 end
 
-const _DP_PLANS = Dict{Int,HafnianDPPlan}()
+# One cache per layout, rather than a single `Dict{Int,HafnianDPPlan}`: an abstractly-typed cache
+# would make every `_haf_dp` call a dynamic dispatch and leave `hafnian`'s return type uninferrable.
+const _DP_PLANS32 = Dict{Int,HafnianDPPlan{Int32}}()
+const _DP_PLANS64 = Dict{Int,HafnianDPPlan{Int64}}()
 const _DP_PLAN_LOCK = ReentrantLock()
 
-"""
-    _dp_plan(K) -> HafnianDPPlan
+_dp_cache(::Type{Int32}) = _DP_PLANS32
+_dp_cache(::Type{Int64}) = _DP_PLANS64
 
-The degree-`K` plan, built on first use and cached for the rest of the session.
+"""
+    _dp_plan(K, I = _dp_index_type(K)) -> HafnianDPPlan{I}
+
+The degree-`K` plan in layout `I`, built on first use and cached for the rest of the session.
 
 Plans are pure functions of `K`, so caching them is what makes the DP worth using at the larger
-degrees: the build is a few hundred milliseconds at `DP_MAX` but is paid once. The cache is never
-evicted; see [`DP_MAX`](@ref) for the size it is allowed to reach.
+degrees: the build is a few hundred milliseconds at `DP_MAX`, and seconds to minutes above it, but
+is paid once. The cache is never evicted; see [`DP_MAX`](@ref) and [`DP_HARD_MAX`](@ref) for the
+sizes it is allowed to reach.
 """
-function _dp_plan(K::Int)
+function _dp_plan(K::Int, ::Type{I} = _dp_index_type(K)) where {I<:Signed}
     lock(_DP_PLAN_LOCK) do
-        get!(() -> _build_dp_plan(K), _DP_PLANS, K)
+        get!(() -> _build_dp_plan(K, I), _dp_cache(I), K)::HafnianDPPlan{I}
     end
 end
 
-# Evaluate states `lo:hi`, all of which must have had their children evaluated already.
+"""
+    _dp_states!(H, P, starts, trans, lo, hi)
+
+Evaluate states `lo:hi` into `H`, reading gathered matrix entries from `P`.
+
+The inner loop of the whole package: one multiply-add per transition, with both operands reached
+through indirection. Every state in `lo:hi` must have had its children evaluated already, which
+holds because states are numbered by subset size and transitions always descend two sizes — see
+[`HafnianDPPlan`](@ref).
+
+The shift and mask come from the transition type via [`_pair_bits`](@ref), so they are compile-time
+constants in each specialisation rather than loads from the plan.
+"""
 function _dp_states!(
     H::Vector{T},
     P::Vector{T},
-    starts::Vector{Int32},
-    trans::Vector{Int32},
+    starts::Vector{I},
+    trans::Vector{I},
     lo::Int,
     hi::Int,
-) where {T}
+) where {T,I}
+    bits = _pair_bits(I)            # compile-time constants: `I` fixes both
+    mask = _pair_mask(I)
     @inbounds for s in lo:hi
         acc = zero(T)
         for k in starts[s]:starts[s+1]-1
             t = trans[k]
-            acc += P[t&_DP_PAIR_MASK] * H[t>>_DP_PAIR_BITS]
+            acc += P[t&mask] * H[t>>bits]
         end
         H[s] = acc
     end
@@ -284,9 +407,9 @@ rather than arithmetic. Small degrees stay serial entirely (see [`_DP_PARALLEL_M
 function _haf_dp(
     A::AbstractMatrix{T},
     idx::AbstractVector{<:Integer},
-    plan::HafnianDPPlan;
+    plan::HafnianDPPlan{I};
     nthreads::Int = 1,
-) where {T}
+) where {T,I}
     K = plan.K
     length(idx) == K || throw(DimensionMismatch("idx has length $(length(idx)), plan expects $K"))
 

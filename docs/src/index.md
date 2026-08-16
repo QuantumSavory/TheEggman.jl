@@ -38,7 +38,8 @@ true
 Which algorithm runs is chosen automatically, by comparing costs that are all known before any work
 starts. `method=:unrolled` uses a `@generated` branch-free expansion of the definition (degrees up to
 `TheEggman.UNROLL_MAX`); `method=:dp` evaluates the same recursion over memoised subsets, whose count
-grows only like `φ^K` (degrees up to `TheEggman.DP_MAX`); `method=:sieve` runs the `O(N³ 2^(N/2))`
+grows only like `φ^K` (chosen automatically up to `TheEggman.DP_MAX`, and available on request up to
+`TheEggman.DP_HARD_MAX` on a wider layout, for machines with the memory for a multi-gigabyte plan); `method=:sieve` runs the `O(N³ 2^(N/2))`
 finite-difference sieve of [Björklund, Gupt & Quesada](https://arxiv.org/abs/2108.01622), which is
 the fallback at large degrees and the best choice when repeated rows shrink it. See `src/unrolled.jl`,
 `src/dp.jl` and `src/hafnian.jl` respectively.
