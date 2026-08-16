@@ -21,7 +21,7 @@ using JSON
 
 bench_dir = length(ARGS) > 0 ? ARGS[1] : ".benchmarks"
 
-const NS = (8, 12, 16, 20, 24, 28)
+const NS = (4, 8, 12, 16, 20, 24, 28, 32, 36)
 
 # BenchmarkTools' 5s-per-case default would keep every core pegged for over a minute, leaving the
 # CPU hot (and clocked down) for whichever stage runs next. Keep the total short enough that the

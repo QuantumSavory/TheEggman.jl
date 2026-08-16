@@ -18,6 +18,7 @@ import os
 import re
 import sys
 
+from matplotlib import ticker
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
@@ -68,7 +69,7 @@ panel_titles = {
 }
 variants = ["eggman", "thewalrus"]
 
-fig, axes = plt.subplots(1, len(rpts), figsize=(10, 7), sharey=True)
+fig, axes = plt.subplots(1, len(rpts), figsize=(12, 8), sharey=True)
 if len(rpts) == 1:
     axes = [axes]
 
@@ -120,6 +121,7 @@ for ax, rpt in zip(axes, rpts):
     ax.set_xticklabels([f"N={N}" for N in Ns])
     ax.set_xlabel("N (total degree)")
     ax.set_yscale("log")
+    ax.yaxis.set_major_locator(ticker.LogLocator(base=10.0, subs=(1.0,), numticks=100))
     ax.set_title(panel_titles.get(rpt, f"rpt={rpt}"))
     ax.grid(axis="y", alpha=0.3)
     # Headroom so the speedup label above the tallest group stays inside the axes.

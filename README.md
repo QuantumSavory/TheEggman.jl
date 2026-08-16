@@ -118,15 +118,6 @@ stages individually.
 
 On a 12-thread i7-1365U, mean speedup over `thewalrus` at total degree `N`:
 
-| N  | `hafnian` (distinct rows) | `hafnian_repeated` (rpt = 2) |
-|----|---------------------------|------------------------------|
-| 8  | 1604x                     | 596x                         |
-| 12 | 190x                      | 61x                          |
-| 16 | 71x                       | 16x                          |
-| 20 | 41x                       | 16x                          |
-| 24 | 26x                       | 13x                          |
-| 28 | 45x                       | 7x                           |
-
 ![Benchmarks comparing Hafnian performance of TheEggman.jl to thewalrus.](assets/images/thewalrus_benchmark_comparison.svg)
 
 The `hafnian` column is unrolled at N=8/12 and DP above; the `hafnian_repeated` column falls back to

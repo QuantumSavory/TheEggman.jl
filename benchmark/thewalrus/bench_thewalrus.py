@@ -31,7 +31,7 @@ bench_dir = sys.argv[1] if len(sys.argv) > 1 else ".benchmarks"
 
 # Matches the N sweep in hafnian_bench.jl. Round counts fall off with N because the rpt=1 cost
 # doubles with every step of 2 in N.
-ROUNDS = {8: 200, 12: 200, 16: 100, 20: 50, 24: 20, 28: 10}
+ROUNDS = {4: 200, 8: 200, 12: 200, 16: 100, 20: 50, 24: 20, 28: 10, 32: 5, 36: 3}
 
 
 def _time(fn, rounds):
