@@ -632,7 +632,7 @@ How many tasks the sieve would split into.
 
 Spawning costs a few microseconds per task and the chunks are equal-sized, so on a machine with
 uneven cores a short parallel run waits on its slowest chunk and loses to running serially. The
-threshold was measured on the `benchmark/thewalrus` sweep: below it, every thread count tested was
+threshold was measured on the `benchmark/competitors` sweep: below it, every thread count tested was
 slower than one; above it, using all of them was fastest.
 
 Also consulted by [`_choose_method`](@ref), since the sieve is the only strategy that threads.

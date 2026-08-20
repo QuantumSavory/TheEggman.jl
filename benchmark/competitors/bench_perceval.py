@@ -24,7 +24,7 @@ perceval's Fock-state bookkeeping is counted against it) and the only general on
 Runs in the same isolated uv-managed venv as thewalrus, which is also used here to check the
 reduction actually holds before any timing is done:
 
-    uv run --project benchmark/thewalrus python benchmark/thewalrus/bench_perceval.py [bench_dir]
+    uv run --project benchmark/competitors python benchmark/competitors/bench_perceval.py [bench_dir]
 """
 
 import json

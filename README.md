@@ -115,19 +115,19 @@ times TheEggman.jl against `thewalrus` and Budapest QCG's
 [piquasso](https://github.com/Budapest-Quantum-Computing-Group/piquasso), which run in a shared
 isolated [uv](https://docs.astral.sh/uv/)-managed virtualenv, and writes a comparison plot to a
 timestamped directory under `.benchmarks/`. See
-[`benchmark/thewalrus/README.md`](benchmark/thewalrus/README.md) for details and for how to run the
+[`benchmark/competitors/README.md`](benchmark/competitors/README.md) for details and for how to run the
 stages individually.
 
 On a 12-thread i7-1365U, with mean ratios against TheEggman.jl tabulated under each panel:
 
-![Benchmarks comparing Hafnian performance of TheEggman.jl to thewalrus and piquasso.](assets/images/thewalrus_benchmark_comparison.svg)
+![Benchmarks comparing Hafnian performance of TheEggman.jl to thewalrus and piquasso.](assets/images/competitors_benchmark_comparison.svg)
 
 `thewalrus` and `piquasso` are independent numba implementations of the same Björklund/Glynn sieve;
 piquasso's `hafnian_with_reduction` folds repeats into it the way `hafnian_repeated` does, so it
-covers both panels. It is the faster of the two Python libraries almost everywhere — up to 7.9× in
-the rpt=2 panel — and TheEggman.jl still leads it at every N in the sweep: about 2–3× in rpt=2 from
-N=20 on, 4–22× in rpt=1 over the same range, and three orders of magnitude at the small end where
-the unrolled sum runs in tens of nanoseconds. The `hafnian` panel is unrolled at N=8/12 and DP above; `hafnian_repeated` falls back
+covers both panels. It is the faster of the two Python libraries in the rpt=2 panel throughout — by
+up to 11× — and TheEggman.jl still leads it at every N in the sweep: about 2–3× in rpt=2 from N=20
+on, 3.5–30× in rpt=1 over the same range, and three orders of magnitude at the small end where the
+unrolled sum runs in tens of nanoseconds. The `hafnian` panel is unrolled at N=8/12 and DP above; `hafnian_repeated` falls back
 to the sieve from N=20 on, where repetition has made it the cheapest option, so those entries are
 sieve-vs-sieve.
 
@@ -155,12 +155,12 @@ so a `d×d` permanent and a `2d×2d` hafnian return the same number and can be t
 This is a general-purpose hafnian's worst case by construction: perceval's
 `exqalibur.permanent_cx` (the kernel of its `Naive` back-end, a multithreaded C++ Ryser) reads the
 answer off `B` in `O(2^d d²)`, while neither `hafnian` implementation detects the structure and both
-pay full price on the matrix they are handed. TheEggman.jl wins below the crossover — 27× at N=16,
-where the whole call is 28 µs and perceval cannot amortise its thread-pool dispatch — and is 415×
-slower by N=36. `thewalrus` trails TheEggman.jl throughout and loses to perceval from N=20 on.
+pay full price on the matrix they are handed. TheEggman.jl wins below the crossover — 17× at N=16,
+where the whole call is 12 µs and perceval cannot amortise its thread-pool dispatch — and is 570×
+slower by N=36. `thewalrus` trails TheEggman.jl throughout and loses to perceval from N=16 on.
 If your matrix really is a permanent, use a permanent routine.
 
-The crossover sits somewhere between `N ≈ 18` and `N ≈ 22` depending on the machine's state:
+The crossover sits somewhere between `N ≈ 16` and `N ≈ 22` depending on the machine's state:
 perceval's fixed dispatch cost is the most load-sensitive number in this whole benchmark, measured
 anywhere from 0.15 ms to 1.7 ms per call on the same laptop, and it is what the small-N groups are
 made of. The regime is off by default because it exists only to give perceval something to be

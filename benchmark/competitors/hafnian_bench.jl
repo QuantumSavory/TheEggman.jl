@@ -21,7 +21,7 @@
 #          structure that lets a permanent routine get the same number in O(2^d d^2).
 #
 # Runnable directly:
-#     julia --project=benchmark -t auto benchmark/thewalrus/hafnian_bench.jl [bench_dir] [--perm]
+#     julia --project=benchmark -t auto benchmark/competitors/hafnian_bench.jl [bench_dir] [--perm]
 
 using TheEggman
 using BenchmarkTools
@@ -79,15 +79,15 @@ for name in sort(collect(keys(results)))
 end
 
 mkpath(bench_dir)
-BenchmarkTools.save(joinpath(bench_dir, "jl-thewalrus-hafnian-bench.json"), results)
+BenchmarkTools.save(joinpath(bench_dir, "jl-eggman-hafnian-bench.json"), results)
 
 # thewalrus parallelises its sieve with numba's `prange` and we parallelise ours with Julia tasks,
 # so the thread count is part of the result and belongs in the plot.
-open(joinpath(bench_dir, "jl-thewalrus-hafnian-meta.json"), "w") do io
+open(joinpath(bench_dir, "jl-eggman-hafnian-meta.json"), "w") do io
     JSON.print(io, Dict(
         "nthreads" => Threads.nthreads(),
         "julia_version" => string(VERSION),
         "cpu" => Sys.cpu_info()[1].model,
     ))
 end
-println("Saved to $(joinpath(bench_dir, "jl-thewalrus-hafnian-bench.json"))")
+println("Saved to $(joinpath(bench_dir, "jl-eggman-hafnian-bench.json"))")

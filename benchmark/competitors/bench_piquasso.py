@@ -19,9 +19,9 @@ and TheEggman.jl's `hafnian_repeated` do. So piquasso appears in both panels of 
 The matrices match bench_thewalrus.py seed for seed, and the results are checked against
 thewalrus in this same venv before any timing is done.
 
-Runs in the isolated uv-managed venv at benchmark/thewalrus/:
+Runs in the isolated uv-managed venv at benchmark/competitors/:
 
-    uv run --project benchmark/thewalrus python benchmark/thewalrus/bench_piquasso.py [bench_dir]
+    uv run --project benchmark/competitors python benchmark/competitors/bench_piquasso.py [bench_dir]
 """
 
 import json

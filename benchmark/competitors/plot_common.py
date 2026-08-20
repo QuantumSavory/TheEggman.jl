@@ -46,7 +46,7 @@ PY_FILES = (
     "py-piquasso-hafnian-bench.json",
     "py-perceval-perm-bench.json",
 )
-JL_FILE = "jl-thewalrus-hafnian-bench.json"
+JL_FILE = "jl-eggman-hafnian-bench.json"
 
 PATTERN = re.compile(r"^haf\.([a-z]+)\.(rpt1|rpt2|perm)\.N=(\d+)$")
 
@@ -191,11 +191,19 @@ def add_legend(fig, variants):
 
 
 def hardware_subtitle(bench_dir, include_perceval=False):
-    """The thread counts and versions the timings depend on, for the figure subtitle."""
+    """The versions and thread counts the timings depend on, for the figure subtitle.
+
+    One entry per library actually drawn in that figure -- perceval and piquasso never share one.
+    Each is skipped if its stage did not write a meta file.
+    """
     parts = []
-    meta = load(bench_dir, "jl-thewalrus-hafnian-meta.json") or {}
-    if meta:
-        parts.append(f"Julia {meta.get('julia_version', '?')}, {meta.get('nthreads', '?')} threads")
+    jl = load(bench_dir, "jl-eggman-hafnian-meta.json") or {}
+    if jl:
+        parts.append(f"Julia {jl.get('julia_version', '?')}, {jl.get('nthreads', '?')} threads")
+    tw = load(bench_dir, "py-thewalrus-hafnian-meta.json") or {}
+    if tw:
+        parts.append(f"thewalrus {tw.get('thewalrus_version', '?')}, "
+                     f"{tw.get('numba_threads', '?')} numba threads")
     pq = load(bench_dir, "py-piquasso-hafnian-meta.json") or {}
     if pq and not include_perceval:
         parts.append(f"piquasso {pq.get('piquasso_version', '?')}, "

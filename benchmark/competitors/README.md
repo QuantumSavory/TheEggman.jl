@@ -5,7 +5,7 @@ Two images come out of it:
 
 | image | libraries | produced by |
 |---|---|---|
-| `thewalrus_benchmark_comparison.svg` | thewalrus, piquasso, TheEggman.jl | always |
+| `competitors_benchmark_comparison.svg` | thewalrus, piquasso, TheEggman.jl | always |
 | `perceval_benchmark_comparison.svg`  | thewalrus, perceval, TheEggman.jl | `--perceval` only |
 
 ## Who is in the main plot, and why
@@ -107,22 +107,26 @@ julia benchmark/run_comparison.jl [bench_dir] [--cooldown SECONDS] [--perceval]
 which runs, from the repo root:
 
 ```sh
-julia --project=benchmark -t auto benchmark/thewalrus/hafnian_bench.jl "$BENCH_DIR" [--perm]
-uv run --project benchmark/thewalrus python benchmark/thewalrus/bench_thewalrus.py "$BENCH_DIR" [--perm]
-uv run --project benchmark/thewalrus python benchmark/thewalrus/bench_piquasso.py "$BENCH_DIR"
-uv run --project benchmark/thewalrus python benchmark/thewalrus/bench_perceval.py "$BENCH_DIR"   # --perceval only
-uv run --project benchmark/thewalrus python benchmark/thewalrus/plot_comparison.py "$BENCH_DIR"
-uv run --project benchmark/thewalrus python benchmark/thewalrus/plot_perceval.py "$BENCH_DIR"    # --perceval only
+julia --project=benchmark -t auto benchmark/competitors/hafnian_bench.jl "$BENCH_DIR" [--perm]
+uv run --project benchmark/competitors python benchmark/competitors/bench_thewalrus.py "$BENCH_DIR" [--perm]
+uv run --project benchmark/competitors python benchmark/competitors/bench_piquasso.py "$BENCH_DIR"
+uv run --project benchmark/competitors python benchmark/competitors/bench_perceval.py "$BENCH_DIR"   # --perceval only
+uv run --project benchmark/competitors python benchmark/competitors/plot_comparison.py "$BENCH_DIR"
+uv run --project benchmark/competitors python benchmark/competitors/plot_perceval.py "$BENCH_DIR"    # --perceval only
 ```
 
-writing `jl-thewalrus-hafnian-bench.json`, `jl-thewalrus-hafnian-meta.json`,
-`py-thewalrus-hafnian-bench.json`, `py-piquasso-hafnian-bench.json`,
-`py-piquasso-hafnian-meta.json` and `thewalrus_benchmark_comparison.svg` to a timestamped directory
-under `.benchmarks/`, plus `py-perceval-perm-bench.json`, `py-perceval-perm-meta.json` and
-`perceval_benchmark_comparison.svg` under `--perceval`.
+writing to a timestamped directory under `.benchmarks/`: a `-bench.json` of raw samples per
+library — `jl-eggman-hafnian-bench.json`, `py-thewalrus-hafnian-bench.json`,
+`py-piquasso-hafnian-bench.json` — a `-meta.json` beside each recording the version and thread
+count that produced it, and `competitors_benchmark_comparison.svg`. `--perceval` adds
+`py-perceval-perm-bench.json`, `py-perceval-perm-meta.json` and
+`perceval_benchmark_comparison.svg`.
 
-`uv run --project benchmark/thewalrus` creates and syncs the venv on first use; run
-`uv sync --project benchmark/thewalrus` to set it up ahead of time. Both plot scripts treat every
+The meta files are what the figure subtitles are built from, so a plot always states the versions
+and thread counts behind it. A bench dir missing one just drops that entry from the subtitle.
+
+`uv run --project benchmark/competitors` creates and syncs the venv on first use; run
+`uv sync --project benchmark/competitors` to set it up ahead of time. Both plot scripts treat every
 input file as optional, so they still work on a bench dir produced before a stage existed — the
 missing series is simply absent. `plot_perceval.py` exits with a message if the dir holds no `perm`
 results at all.
@@ -156,5 +160,5 @@ Four things are worth knowing before trusting a single run:
   three- and four-digit ratios at low N are largely that floor, not the algorithms. perceval's
   floor is the least reproducible number here: on the same laptop it has measured anywhere from
   0.15 ms to 1.7 ms per call depending on what else had just been running, which alone moves the
-  crossover in the perceval plot between N ≈ 18 and N ≈ 22. Both hafnian sieves are far less
+  crossover in the perceval plot between N ≈ 16 and N ≈ 22. Both hafnian sieves are far less
   sensitive, because their cost is arithmetic rather than dispatch.

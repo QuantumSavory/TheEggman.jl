@@ -3,5 +3,5 @@
 /docs/build/
 /benchmark/Manifest*.toml
 /.benchmarks/
-/benchmark/thewalrus/.venv/
+/benchmark/competitors/.venv/
 __pycache__/

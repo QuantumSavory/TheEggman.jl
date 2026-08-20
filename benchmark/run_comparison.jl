@@ -12,7 +12,7 @@
 # `perceval_benchmark_comparison.svg`. It is off by default because perceval has no hafnian: it
 # answers a different question, on a regime that exists only to give it something to be compared
 # against, and benchmarking that regime roughly doubles the two hafnian stages. See
-# benchmark/thewalrus/README.md.
+# benchmark/competitors/README.md.
 #
 # Each stage runs as its own subprocess so the Julia benchmark gets `-t auto` regardless of how
 # this script was started, and so a failure in one stage reports which one. The timing stages are
@@ -23,7 +23,7 @@ using Dates
 
 const ROOT = dirname(@__DIR__)
 const BENCH = joinpath(ROOT, "benchmark")
-const PYPROJ = joinpath(BENCH, "thewalrus")
+const PYPROJ = joinpath(BENCH, "competitors")
 
 args = copy(ARGS)
 with_perceval = "--perceval" in args

@@ -1,5 +1,5 @@
 [project]
-name = "theeggman-thewalrus-bench"
+name = "theeggman-competitors-bench"
 version = "0.1.0"
 description = "Isolated benchmark comparing TheEggman.jl's hafnian routines against Xanadu's thewalrus, Budapest QCG's piquasso and Quandela's perceval"
 requires-python = ">=3.10,<3.13"

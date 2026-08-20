@@ -18,12 +18,13 @@ regimes, matching hafnian_bench.jl:
          O(2^d d^2).
 
 thewalrus parallelises its sieve internally with numba's `prange`, so these timings already use
-every core; the Julia side records its own thread count in jl-thewalrus-hafnian-meta.json.
+every core; the version and thread count land in py-thewalrus-hafnian-meta.json, and the Julia side
+records its own in jl-eggman-hafnian-meta.json.
 
-Runs in the isolated uv-managed venv at benchmark/thewalrus/ (kept separate from any other project
+Runs in the isolated uv-managed venv at benchmark/competitors/ (kept separate from any other project
 venv because thewalrus pins numba, which caps the interpreter at Python <=3.12):
 
-    uv run --project benchmark/thewalrus python benchmark/thewalrus/bench_thewalrus.py \
+    uv run --project benchmark/competitors python benchmark/competitors/bench_thewalrus.py \
         [bench_dir] [--perm]
 """
 
@@ -32,7 +33,9 @@ import os
 import sys
 import time
 
+import numba
 import numpy as np
+import thewalrus
 from thewalrus import hafnian, hafnian_repeated
 
 args = sys.argv[1:]
@@ -91,4 +94,12 @@ os.makedirs(bench_dir, exist_ok=True)
 out_path = os.path.join(bench_dir, "py-thewalrus-hafnian-bench.json")
 with open(out_path, "w") as f:
     json.dump(results, f)
+
+# thewalrus parallelises its sieve with numba's `prange`, so the thread count is part of the
+# result, as is the version -- the sieve has been reworked across releases.
+with open(os.path.join(bench_dir, "py-thewalrus-hafnian-meta.json"), "w") as f:
+    json.dump({
+        "thewalrus_version": thewalrus.__version__,
+        "numba_threads": numba.get_num_threads(),
+    }, f)
 print(f"Saved to {out_path}")

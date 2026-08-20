@@ -14,7 +14,7 @@ rows make it cheap (which is why the rpt=2 panel falls back to sieve-vs-sieve at
 Under each panel is a small table of mean ratios against TheEggman.jl, one column per group.
 
 perceval is not here: it has no hafnian, and is plotted separately by plot_perceval.py on the one
-regime it can be compared on. See benchmark/thewalrus/README.md.
+regime it can be compared on. See benchmark/competitors/README.md.
 
 Usage: python plot_comparison.py [bench_dir]
 """
@@ -48,16 +48,14 @@ for i, (ax, regime) in enumerate(zip(axes, regimes)):
 
 axes[0].set_ylabel("Execution Time (s)")
 
-subtitle = "TheEggman.jl picks per problem: unrolled sum / subset DP / sieve"
+title = "Hafnian: TheEggman.jl vs thewalrus vs piquasso"
 hardware = pc.hardware_subtitle(bench_dir)
-if hardware:
-    subtitle += f" - {hardware}"
-fig.suptitle(f"Hafnian: TheEggman.jl vs thewalrus vs piquasso\n{subtitle}", fontsize=10)
+fig.suptitle(f"{title}\n{hardware}" if hardware else title, fontsize=10)
 pc.add_legend(fig, variants)
 
 fig.tight_layout(rect=(0, 0.04, 1, 1))
 # Room under the axes for the ratio table and its row labels, which tight_layout cannot see.
 fig.subplots_adjust(bottom=0.21, left=0.175)
-out = f"{bench_dir}/thewalrus_benchmark_comparison.svg"
+out = f"{bench_dir}/competitors_benchmark_comparison.svg"
 fig.savefig(out)
 print(f"Saved plot to {out}")
