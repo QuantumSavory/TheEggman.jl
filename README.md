@@ -111,20 +111,62 @@ matrix entries with no cancellation between large signed terms. Results agree wi
 julia benchmark/run_comparison.jl
 ```
 
-times TheEggman.jl, times `thewalrus` in an isolated [uv](https://docs.astral.sh/uv/)-managed
-virtualenv, and writes a comparison plot to a timestamped directory under `.benchmarks/`. See
+times TheEggman.jl against `thewalrus` and Budapest QCG's
+[piquasso](https://github.com/Budapest-Quantum-Computing-Group/piquasso), which run in a shared
+isolated [uv](https://docs.astral.sh/uv/)-managed virtualenv, and writes a comparison plot to a
+timestamped directory under `.benchmarks/`. See
 [`benchmark/thewalrus/README.md`](benchmark/thewalrus/README.md) for details and for how to run the
 stages individually.
 
-On a 12-thread i7-1365U, mean speedup over `thewalrus` at total degree `N`:
+On a 12-thread i7-1365U, with mean ratios against TheEggman.jl tabulated under each panel:
 
-![Benchmarks comparing Hafnian performance of TheEggman.jl to thewalrus.](assets/images/thewalrus_benchmark_comparison.svg)
+![Benchmarks comparing Hafnian performance of TheEggman.jl to thewalrus and piquasso.](assets/images/thewalrus_benchmark_comparison.svg)
 
-The `hafnian` column is unrolled at N=8/12 and DP above; the `hafnian_repeated` column falls back to
-the sieve from N=20 on, where repetition has made it the cheapest option, so those entries are
+`thewalrus` and `piquasso` are independent numba implementations of the same Björklund/Glynn sieve;
+piquasso's `hafnian_with_reduction` folds repeats into it the way `hafnian_repeated` does, so it
+covers both panels. It is the faster of the two Python libraries almost everywhere — up to 7.9× in
+the rpt=2 panel — and TheEggman.jl still leads it at every N in the sweep: about 2–3× in rpt=2 from
+N=20 on, 4–22× in rpt=1 over the same range, and three orders of magnitude at the small end where
+the unrolled sum runs in tens of nanoseconds. The `hafnian` panel is unrolled at N=8/12 and DP above; `hafnian_repeated` falls back
+to the sieve from N=20 on, where repetition has made it the cheapest option, so those entries are
 sieve-vs-sieve.
 
-Both libraries use every core, so these are wall-clock ratios on a thermally-constrained laptop and
-the run-to-run spread is wide — treat the exact multipliers as indicative and the ordering as the
-stable part. Timings exclude one-time warmup on both sides: numba's JIT for thewalrus, DP plan
-construction for TheEggman.jl.
+`StrawberryFields` is not benchmarked: it has no hafnian of its own and imports every one from
+`thewalrus`, so timing it would time `thewalrus` twice.
+
+### The permanent as a hafnian
+
+```sh
+julia benchmark/run_comparison.jl --perceval
+```
+
+additionally benchmarks Quandela's [perceval](https://github.com/Quandela/Perceval) and writes a
+second image. perceval has no hafnian — it is a Fock-state simulator built entirely on
+**permanents** — but the permanent is a hafnian of a block-antidiagonal matrix,
+
+```
+perm(B) = haf([0 B; Bᵀ 0])
+```
+
+so a `d×d` permanent and a `2d×2d` hafnian return the same number and can be timed head to head.
+
+![Benchmark comparing the permanent-as-hafnian regime across TheEggman.jl, thewalrus and perceval.](assets/images/perceval_benchmark_comparison.svg)
+
+This is a general-purpose hafnian's worst case by construction: perceval's
+`exqalibur.permanent_cx` (the kernel of its `Naive` back-end, a multithreaded C++ Ryser) reads the
+answer off `B` in `O(2^d d²)`, while neither `hafnian` implementation detects the structure and both
+pay full price on the matrix they are handed. TheEggman.jl wins below the crossover — 27× at N=16,
+where the whole call is 28 µs and perceval cannot amortise its thread-pool dispatch — and is 415×
+slower by N=36. `thewalrus` trails TheEggman.jl throughout and loses to perceval from N=20 on.
+If your matrix really is a permanent, use a permanent routine.
+
+The crossover sits somewhere between `N ≈ 18` and `N ≈ 22` depending on the machine's state:
+perceval's fixed dispatch cost is the most load-sensitive number in this whole benchmark, measured
+anywhere from 0.15 ms to 1.7 ms per call on the same laptop, and it is what the small-N groups are
+made of. The regime is off by default because it exists only to give perceval something to be
+compared against, and benchmarking it roughly doubles the two hafnian stages.
+
+Every library here uses every core, so these are wall-clock ratios on a thermally-constrained laptop
+and the run-to-run spread is wide — treat the exact multipliers as indicative and the ordering as
+the stable part. Timings exclude one-time warmup on every side: numba's JIT for thewalrus and
+piquasso, exqalibur's thread-pool spin-up for perceval, DP plan construction for TheEggman.jl.
