@@ -78,7 +78,7 @@ Parallel scaling tops out near 4× on 12 threads rather than approaching the thr
 indirect loads per multiply make the loop memory-bound once several cores are running. Degrees below
 `N ≈ 20` run serially, where the levels are too small to repay a spawn.
 
-**`:sieve` — everything else.** The `O(N³ 2^(N/2))` finite-difference sieve of
+**`:sieve` — everything else.** The `O(N³ 2^(N/2))` sieve of
 [Björklund, Gupt & Quesada](https://arxiv.org/abs/2108.01622), the algorithm `thewalrus` uses. It is
 the fallback above `DP_MAX`, and it is also the *best* choice whenever repeated rows shrink it far
 enough — `hafnian_repeated` pairs repeats into as few distinct edges as possible, turning the sieve
@@ -101,9 +101,28 @@ assumed: the Hessenberg reduction uses Gaussian similarity transforms with parti
 interleaved complex storage does not. The sieve is spread across threads once it is large enough to
 be worth it; the other two strategies are single-threaded.
 
-Both direct strategies are more accurate than either sieve variant, since they sum products of
-matrix entries with no cancellation between large signed terms. Results agree with `thewalrus` to
-~1e-14 relative on random complex symmetric matrices.
+The sieve comes in two variants and the cheaper one is chosen per problem, the same way the strategy
+is. Inclusion–exclusion always runs more terms — 2× for distinct rows, 1.5× at `rpt = 2` — but its
+multiplicities can hit zero, dropping edges and shrinking the submatrix each term works on. For
+distinct rows that shrinkage wins outright; once rows repeat, Glynn's multiplicities can vanish too,
+only the term count is left, and Glynn wins. Speedup of the variant chosen over the other one:
+
+| chosen                          | N=20  | N=24  | N=28  | N=34  | N=36  |
+|---------------------------------|-------|-------|-------|-------|-------|
+| distinct rows → inclusion–excl. | 1.32× | 1.47× | 1.71× | 1.80× | 2.05× |
+| repeated rows → Glynn           | 1.49× | 1.75× | 1.54× | —     | —     |
+
+Accuracy points the same way for repeated rows and the opposite way for distinct ones:
+inclusion–exclusion sums terms much larger than the answer and relies on cancellation, costing one
+to two decimal digits. Against a `BigFloat` reference, Glynn holds `1e-14`–`5e-14` where
+inclusion–exclusion runs `3e-13`–`3e-11` — a 24–744× spread, and 105× on the worst of twelve draws
+at `N = 20`. So on repeated rows the automatic choice is strictly better on both counts; on distinct
+rows it trades those digits for the speed. Pass `glynn=true` to force accuracy over speed.
+
+Both direct strategies are far more accurate than either sieve variant — machine precision (`2e-16`
+measured) — since they sum products of matrix entries with no cancellation at all. Results agree
+with `thewalrus` to ~1e-14 relative where a direct strategy runs, and to ~1e-12 where the default
+sieve does.
 
 ## Benchmarks
 

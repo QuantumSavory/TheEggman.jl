@@ -450,10 +450,27 @@ Decide between the DP and the sieve for total degree `K`.
 
 `sieve_work` is the sieve's serial multiply-add count and `nchunks` the number of tasks it would
 split into, so `sieve_work / nchunks` is what it actually costs in wall clock. The DP is compared
-against that at its *serial* cost, with a transition weighted at about twice a sieve work unit —
-both are indirect loads, but the sieve's reduction vectorises. Since the DP also threads (less well:
-~4× against the sieve's ~5×), that makes the comparison conservative in the sieve's favour, which is
-where the two are closest and mispicking would cost the most.
+against that at its *serial* cost, since it threads less well (~4× against the sieve's ~5×), which
+keeps the comparison conservative in the sieve's favour — where the two are closest and mispicking
+would cost the most.
+
+A DP transition is weighted at one sieve work unit. Unlike the other constants in this package that
+is not a comfortable threshold with slack on both sides — the two classes genuinely overlap. Over a
+19-case sweep the cases the DP should win go down to a ratio of 0.37 while the cases the sieve should
+win reach 0.89, so *no* single weight separates them. One is the least any weight achieves, and
+weights in `[0.89, 1.25]` all achieve it; 1 sits in the middle of that. The surviving miss is
+`rpt = fill(2, 9)`, where the sieve gets chosen and costs 1.34×.
+
+The overlap is the model's fault, not the data's: it prices both strategies as a single work count
+times a constant, but the sieve carries a few microseconds of fixed setup that dominates its
+smallest cases, and neither strategy's cost per unit is really constant across cache regimes. A
+model with an intercept would separate them; a linear one cannot.
+
+The weight is deliberately *not* the 2 that was correct before [`_sieve_variant_cost`](@ref) existed.
+Pricing the sieve as `steps × _term_cost(E, n)` overstated it — every term was charged at full size,
+though terms shrink whenever a multiplicity vanishes — so a transition had to be weighted at 2 to
+compensate. Now that the sieve is costed honestly the compensation has to come out, or the DP loses
+distinct-row cases it wins by 12×.
 
 This matters most for repeated rows: enough repetition shrinks the sieve below the DP even at large
 `K` (`rpt = [2,2,…]` at `N = 28` sieves), while for distinct rows the DP wins at every degree it
@@ -462,5 +479,5 @@ covers.
 function _prefer_dp(K::Int, sieve_work::Int, nchunks::Int)
     K <= DP_MAX || return false
     _, ntrans = _dp_counts(K)
-    return 2 * ntrans < sieve_work ÷ max(nchunks, 1)
+    return ntrans < sieve_work ÷ max(nchunks, 1)
 end

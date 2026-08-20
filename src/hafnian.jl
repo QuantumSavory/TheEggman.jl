@@ -626,44 +626,72 @@ end
 _term_cost(E::Int, n::Int) = (5 * (2E)^3) ÷ 3 + 2E * n * n
 
 """
-    _sieve_chunks(steps, E, n, nthreads) -> Int
+    _sieve_chunks(work, steps, nthreads) -> Int
 
-How many tasks the sieve would split into.
+How many tasks the sieve would split into, given its exact multiply-add count and term count.
 
 Spawning costs a few microseconds per task and the chunks are equal-sized, so on a machine with
 uneven cores a short parallel run waits on its slowest chunk and loses to running serially. The
 threshold was measured on the `benchmark/competitors` sweep: below it, every thread count tested was
 slower than one; above it, using all of them was fastest.
 
+`work` must come from [`_sieve_variant_cost`](@ref), not from `steps × _term_cost(E, n)`. The two
+differ whenever multiplicities can vanish, and using the cruder figure here made the *threading*
+decision disagree between the two sieve variants: at `rpt = fill(2, 8)` Glynn does a third less work
+yet fell below the threshold while inclusion–exclusion rose above it, so Glynn ran serially, lost on
+wall clock, and dragged the variant choice with it.
+
 Also consulted by [`_choose_method`](@ref), since the sieve is the only strategy that threads.
 """
-@inline _sieve_chunks(steps::Int, E::Int, n::Int, nthreads::Int) =
-    steps * _term_cost(E, n) < 90_000 ? 1 : min(nthreads, steps)
+@inline _sieve_chunks(work::Int, steps::Int, nthreads::Int) =
+    work < 90_000 ? 1 : min(nthreads, steps)
 
 """
-    _calc_hafnian(Ax, edge_reps; nthreads) -> T
+    _calc_hafnian(Ax, edge_reps; nthreads, glynn = false) -> T
 
-Run the Glynn sieve over `Ax`, a matrix already permuted so that the fixed perfect matching pairs
-row `i` with row `i + E`.
+Run the sieve over `Ax`, a matrix already permuted so that the fixed perfect matching pairs row `i`
+with row `i + E`.
 
-The odometer runs over `∏(edge_reps .+ 1)` multiplicity vectors, with the leading digit clipped to
-its lower half to exploit the `δ → -δ` symmetry, and the whole sum is scaled by `2^{-(n-1)}` at the
-end.
+The odometer runs over `∏(edge_reps .+ 1)` multiplicity vectors. Under `glynn` the leading digit is
+clipped to its lower half to exploit the `δ → -δ` symmetry and the sum is scaled by `2^{-(n-1)}` at
+the end; otherwise the multiplicities are plain inclusion–exclusion counts.
+
+# Choosing between them
+
+Which is faster depends entirely on whether rows repeat, and the two effects pull opposite ways.
+Inclusion–exclusion always runs more terms — 2× for distinct rows, 1.5× at `rpt = 2` — but its
+multiplicities can hit zero, which drops edges and shrinks the submatrix each term works on. For
+distinct rows that shrinkage is decisive (Glynn's `±1` multiplicities never vanish, so every term
+runs at full size); once rows repeat, Glynn's multiplicities can vanish too and only the term count
+is left, which it wins.
+
+Measured on 12 threads:
+
+| case      | rpt1 N=20 | rpt1 N=24 | rpt1 N=28 | rpt2 N=20 | rpt2 N=24 | rpt2 N=28 |
+|-----------|-----------|-----------|-----------|-----------|-----------|-----------|
+| inclexcl  | 1.32×     | 1.47×     | 1.71×     | 0.60×     | 0.62×     | 0.63×     |
+
+Accuracy runs the other way. Inclusion–exclusion sums terms far larger than the answer and relies on
+cancellation, so it loses one to two decimal digits: against a `BigFloat` reference, Glynn holds
+`1e-14`–`5e-14` while inclusion–exclusion runs `3e-13`–`3e-11`, a 24–744× spread and 105× on the
+worst of twelve draws at `N = 20`. Both are far behind the direct strategies, which sit at machine
+precision (`2e-16`) because they never cancel at all.
+
+Which is why the caller does not pick: [`_choose_method`](@ref) costs both and returns the cheaper,
+so distinct rows get inclusion–exclusion and repeated rows get Glynn, which there is both faster
+*and* more accurate. Pass `glynn = true` explicitly when the extra digits matter more than the time.
 """
 function _calc_hafnian(
     Ax::Matrix{T},
     edge_reps::Vector{Int};
     nthreads::Int = nthreads(),
-    glynn::Bool = true,
+    glynn::Bool = false,
 ) where {T}
     E = length(edge_reps)
     E == 0 && return one(T)
     n = sum(edge_reps)          # half the total number of rows, i.e. the coefficient we extract
 
-    steps = glynn ? (edge_reps[1] + 2) ÷ 2 : edge_reps[1] + 1
-    for i in 2:E
-        steps *= edge_reps[i] + 1
-    end
+    work, steps = _sieve_variant_cost(edge_reps, n, glynn)
 
     R = real(T)
     maxrep = maximum(edge_reps)
@@ -672,7 +700,7 @@ function _calc_hafnian(
         binoms[a+1, b+1] = b <= a ? R(binomial(a, b)) : zero(R)
     end
 
-    nchunks = _sieve_chunks(steps, E, n, nthreads)
+    nchunks = _sieve_chunks(work, steps, nthreads)
 
     # Branch here rather than computing `glynn ? Val(true) : Val(false)`: that would be a
     # `Union{Val{true},Val{false}}`, which makes the sieve call a dynamic dispatch and leaves the
@@ -799,31 +827,106 @@ distinct rows the unrolled kernel wins by one to two orders of magnitude at ever
 @inline _prefer_unrolled(K::Int, sieve_work::Int) =
     K <= UNROLL_MAX && _unrolled_muls(K) < sieve_work
 
-# Total multiply-adds the sieve would spend on a problem with these edge multiplicities.
-function _sieve_work(edge_reps::Vector{Int})
+# Work counts can run past `typemax(Int)` for degrees nobody will ever sieve; saturate rather than
+# wrap, since every consumer only compares them.
+_clamp_work(x::Float64) = x >= 9.0e18 ? typemax(Int) : round(Int, x)
+
+"""
+    _sieve_variant_cost(edge_reps, n, glynn) -> (work, steps)
+
+Exact multiply-add count and term count for one sieve variant.
+
+Not `steps × _term_cost(E, n)`: terms do *not* all cost the same. An edge whose multiplicity lands
+on zero drops out of that term's submatrix, and `_term_cost` is cubic in how many survive, so the
+distribution matters more than the count. That distribution is a product over edges, so this
+convolves it exactly in `O(E²)` — `counts[c+1]` ends up holding how many terms keep `c` edges.
+
+The two variants differ in how often a multiplicity vanishes:
+
+  * inclusion–exclusion draws each multiplicity from `0:rᵢ`, so exactly one of the `rᵢ+1` choices is
+    zero, always;
+  * Glynn draws `2k - rᵢ`, which is zero only when `rᵢ` is *even*. With odd multiplicities — the
+    all-distinct case, where every `rᵢ = 1` — no edge ever drops and every term runs at full size.
+
+That is the whole story of which variant wins. For distinct rows Glynn pays full size on every term
+and loses despite running half as many; once rows repeat with even counts both drop edges at the
+same rate, the sizes match, and Glynn's smaller term count decides it.
+"""
+function _sieve_variant_cost(edge_reps::Vector{Int}, n::Int, glynn::Bool)
     E = length(edge_reps)
-    E == 0 && return 0
-    return _sieve_steps(edge_reps) * _term_cost(E, sum(edge_reps))
+    E == 0 && return (0, 0)
+
+    counts = zeros(Float64, E + 1)          # counts[c+1]: terms keeping c edges so far
+    counts[1] = 1.0
+    for i in 1:E
+        r = edge_reps[i]
+        # Glynn clips the leading digit to its lower half; the zero multiplicity, when it exists,
+        # sits at the top of that clipped range and so survives the clipping.
+        total = glynn ? (i == 1 ? (r + 2) ÷ 2 : r + 1) : r + 1
+        nzero = glynn ? (iseven(r) ? 1 : 0) : 1
+        nkeep = total - nzero
+        for c in i-1:-1:0
+            v = counts[c+1]
+            v == 0.0 && continue
+            counts[c+1] = v * nzero
+            counts[c+2] += v * nkeep
+        end
+    end
+
+    work = 0.0
+    steps = 0.0
+    for c in 0:E
+        counts[c+1] == 0.0 && continue
+        steps += counts[c+1]
+        work += counts[c+1] * _term_cost(c, n)   # c = 0 costs nothing: the term is empty
+    end
+    return (_clamp_work(work), _clamp_work(steps))
 end
 
-function _sieve_steps(edge_reps::Vector{Int})
-    steps = (edge_reps[1] + 2) ÷ 2
-    for i in 2:length(edge_reps)
-        steps *= edge_reps[i] + 1
+# `hafnian` has all-ones multiplicities and prices them without materialising the vector, which is
+# what keeps its unrolled path allocation-free. Same quantities as `_sieve_variant_cost`, closed
+# form: Glynn never drops an edge, inclusion–exclusion drops each independently with probability ½.
+function _sieve_variant_cost_distinct(E::Int, glynn::Bool)
+    E == 0 && return (0, 0)
+    if glynn
+        steps = 2.0^(E - 1)
+        return (_clamp_work(steps * _term_cost(E, E)), _clamp_work(steps))
     end
-    return steps
+    work = 0.0
+    for c in 0:E
+        work += binomial(E, c) * Float64(_term_cost(c, E))
+    end
+    return (_clamp_work(work), _clamp_work(2.0^E))
 end
 
 """
-    _choose_method(K, edge_reps, nthreads) -> Symbol
+    _best_sieve_variant(costs...) -> Bool
+
+Whether Glynn beats inclusion–exclusion, given each one's exact work.
+"""
+@inline _best_sieve_variant(work_glynn::Int, work_inclexcl::Int) = work_glynn <= work_inclexcl
+
+"""
+    _choose_method(K, edge_reps, nthreads) -> (method, glynn)
 
 Pick between `:unrolled`, `:dp` and `:sieve` for a problem of total degree `K` whose sieve would run
-over `edge_reps`.
+over `edge_reps`, and pick which sieve variant to use if it comes to that.
 
 All three compute the same thing; only their costs differ, and those costs are known in advance
 (see [`_prefer_unrolled`](@ref) and [`_prefer_dp`](@ref)). The sieve's count is divided by the
 number of tasks it would spread over, since it is the only one of the three that threads — with one
 thread available the other two win more often, which is the intended behaviour.
+
+The sieve is priced at whichever of its two variants is cheaper, and that variant is returned
+alongside the method so the caller runs the one that was costed. See [`_sieve_variant_cost`](@ref).
+
+Known limits, from a 24-case measured sweep — two picks are wrong, both by under 1.6×:
+
+  * `rpt = fill(2, 9)` takes the sieve where the DP is 1.58× faster. Unavoidable with a linear cost
+    model; see [`_prefer_dp`](@ref) for why the two classes overlap.
+  * `rpt = fill(7, 4)` takes Glynn where inclusion–exclusion is 1.37× faster. With only two edges
+    and large odd multiplicities, `_term_cost`'s cubic-in-size shape misjudges terms that shrink to
+    a 2×2 submatrix, where per-term overhead rather than arithmetic dominates.
 
 The unrolled kernel is tested first and so keeps every degree it covers, even though the DP edges it
 out by ~13% on a `min`-of-many microbenchmark at `K = 12`. That microbenchmark is misleading: the DP
@@ -832,24 +935,34 @@ call is made repeatedly with GC time counted the unrolled kernel is ahead again 
 `K = 12`.
 """
 function _choose_method(K::Int, edge_reps::Vector{Int}, nthreads::Int)
-    isempty(edge_reps) && return :sieve
-    return _choose_method(K, _sieve_steps(edge_reps), length(edge_reps), sum(edge_reps), nthreads)
+    isempty(edge_reps) && return (method = :sieve, glynn = false)
+    n = sum(edge_reps)
+    wg, sg = _sieve_variant_cost(edge_reps, n, true)
+    wi, si = _sieve_variant_cost(edge_reps, n, false)
+    return _decide(K, wg, sg, wi, si, length(edge_reps), n, nthreads)
 end
 
 """
-    _choose_method(K, steps, E, n, nthreads) -> Symbol
+    _choose_method_distinct(K, E, nthreads) -> (method, glynn)
 
-As above, but taking the sieve's shape directly. [`hafnian`](@ref) knows its edge multiplicities are
-all `1` and so can price the alternatives without materialising a vector of them, which is what
-keeps the unrolled path allocation-free.
+As above for all-ones multiplicities, priced in closed form so [`hafnian`](@ref) never has to
+materialise the vector — which is what keeps its unrolled path allocation-free.
 """
-function _choose_method(K::Int, steps::Int, E::Int, n::Int, nthreads::Int)
-    work = steps * _term_cost(E, n)
-    nchunks = _sieve_chunks(steps, E, n, nthreads)
+function _choose_method_distinct(K::Int, E::Int, nthreads::Int)
+    E == 0 && return (method = :sieve, glynn = false)
+    wg, sg = _sieve_variant_cost_distinct(E, true)
+    wi, si = _sieve_variant_cost_distinct(E, false)
+    return _decide(K, wg, sg, wi, si, E, E, nthreads)
+end
+
+function _decide(K::Int, wg::Int, sg::Int, wi::Int, si::Int, E::Int, n::Int, nthreads::Int)
+    glynn = _best_sieve_variant(wg, wi)
+    work, steps = glynn ? (wg, sg) : (wi, si)
+    nchunks = _sieve_chunks(work, steps, nthreads)
     effective = work ÷ max(nchunks, 1)
-    _prefer_unrolled(K, effective) && return :unrolled
-    _prefer_dp(K, work, nchunks) && return :dp
-    return :sieve
+    _prefer_unrolled(K, effective) && return (method = :unrolled, glynn = glynn)
+    _prefer_dp(K, work, nchunks) && return (method = :dp, glynn = glynn)
+    return (method = :sieve, glynn = glynn)
 end
 
 # Expanded index list `idx` with row `i` repeated `rpt[i]` times, as both direct kernels want it.
@@ -896,7 +1009,7 @@ function _check_method(method::Symbol, K::Int)
 end
 
 """
-    hafnian(A; nthreads=Threads.nthreads(), glynn=true, method=:auto, check_symmetric=true) -> Number
+    hafnian(A; nthreads=Threads.nthreads(), glynn=nothing, method=:auto, check_symmetric=true) -> Number
 
 Hafnian of the square symmetric matrix `A`: the sum over all perfect matchings of
 ``∏_{(i,j)} A[i,j]``.
@@ -916,7 +1029,10 @@ overrides the choice:
     problem is large enough to pay for them. The fallback above `DP_MAX`, and the best choice when
     repeated rows shrink it far enough.
 
-`glynn` selects the sieve variant and has no effect on the other two.
+`glynn` selects the sieve variant and has no effect on the other two. Left at `nothing` it is chosen
+per problem like the strategy is: inclusion–exclusion for distinct rows, Glynn once rows repeat.
+Setting it forces one — `true` for the Glynn finite-difference sieve, which is also one to two
+decimal digits more accurate. See [`_calc_hafnian`](@ref) for the measured trade.
 
 `A` is read in place: views, `Symmetric` wrappers and other `AbstractMatrix`es holding the result
 element type are never copied. Indices must be 1-based.
@@ -938,7 +1054,7 @@ See also [`hafnian_repeated`](@ref).
 function hafnian(
     A::AbstractMatrix;
     nthreads::Int = nthreads(),
-    glynn::Bool = true,
+    glynn::Union{Nothing,Bool} = nothing,
     method::Symbol = :auto,
     check_symmetric::Bool = true,
 )
@@ -952,7 +1068,9 @@ function hafnian(
     # All edge multiplicities are 1 here, so the sieve would run `2^(E-1)` terms; pricing that
     # directly avoids allocating the vector on the paths that never sieve.
     E = N ÷ 2
-    chosen = method === :auto ? _choose_method(N, 1 << (E - 1), E, E, nthreads) : method
+    sel = _choose_method_distinct(N, E, nthreads)
+    chosen = method === :auto ? sel.method : method
+    use_glynn = glynn === nothing ? sel.glynn : glynn
     if chosen === :unrolled
         # Distinct rows in their natural order, so no index vector needs materialising.
         return T(_haf_unrolled_range(_kernel_matrix(T, A), N))
@@ -967,7 +1085,7 @@ function hafnian(
         x[i] = 2i - 1
         x[E+i] = 2i
     end
-    return _calc_hafnian(_permuted(T, A, x), ones(Int, E); nthreads, glynn)
+    return _calc_hafnian(_permuted(T, A, x), ones(Int, E); nthreads, glynn = use_glynn)
 end
 
 # hafnian(A) on the full index range 1:N — no index vector needs materialising.
@@ -983,7 +1101,7 @@ end
 end
 
 """
-    hafnian_repeated(A, rpt; nthreads=Threads.nthreads(), glynn=true, method=:auto, check_symmetric=true) -> Number
+    hafnian_repeated(A, rpt; nthreads=Threads.nthreads(), glynn=nothing, method=:auto, check_symmetric=true) -> Number
 
 Hafnian of the matrix obtained by repeating row and column `i` of `A` exactly `rpt[i]` times, i.e.
 `hafnian(reduction(A, rpt))`, but without ever forming that larger matrix.
@@ -1019,7 +1137,7 @@ function hafnian_repeated(
     A::AbstractMatrix,
     rpt::AbstractVector{<:Integer};
     nthreads::Int = nthreads(),
-    glynn::Bool = true,
+    glynn::Union{Nothing,Bool} = nothing,
     method::Symbol = :auto,
     check_symmetric::Bool = true,
 )
@@ -1035,11 +1153,13 @@ function hafnian_repeated(
     check_symmetric ? _check_symmetric(A) : Base.require_one_based_indexing(A)
 
     x, edge_reps = matched_reps(rpt)
-    chosen = method === :auto ? _choose_method(total, edge_reps, nthreads) : method
+    sel = _choose_method(total, edge_reps, nthreads)
+    chosen = method === :auto ? sel.method : method
+    use_glynn = glynn === nothing ? sel.glynn : glynn
     if chosen !== :sieve
         return _haf_direct_method(T, chosen, A, _expanded_indices(rpt, total), nthreads)
     end
-    return _calc_hafnian(_permuted(T, A, x), edge_reps; nthreads, glynn)
+    return _calc_hafnian(_permuted(T, A, x), edge_reps; nthreads, glynn = use_glynn)
 end
 
 """

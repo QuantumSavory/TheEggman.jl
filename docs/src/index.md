@@ -44,8 +44,11 @@ finite-difference sieve of [Björklund, Gupt & Quesada](https://arxiv.org/abs/21
 the fallback at large degrees and the best choice when repeated rows shrink it. See `src/unrolled.jl`,
 `src/dp.jl` and `src/hafnian.jl` respectively.
 
-`glynn=false` selects the inclusion–exclusion sieve variant instead of the default Glynn one (about
-2.5× faster, about 1000× less accurate), and has no effect on the other two strategies.
+The sieve has two variants, and which one is faster depends on whether rows repeat, so it is chosen
+per problem alongside the strategy. Inclusion–exclusion wins on distinct rows — 1.3× at `N=20`
+widening to 2.05× at `N=36` — while Glynn wins by 1.5–1.8× once rows repeat, where it is also one to
+two decimal digits more accurate. `glynn=true` or `false` forces one; the keyword has no effect on
+the other two strategies.
 
 Matrices are read in place — views and `Symmetric` wrappers are never copied — and must be 1-based.
 Symmetry is validated on every call, which is `O(N²)` and so a noticeable fraction of the total at

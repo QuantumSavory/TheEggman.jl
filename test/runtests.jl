@@ -101,7 +101,35 @@ end
         for N in (4, 8, 12)
             A = randsym(rng, ComplexF64, N)
             @test hafnian(A; glynn = false, method = :sieve) ≈
-                  hafnian(A; method = :sieve) rtol = 1e-9
+                  hafnian(A; glynn = true, method = :sieve) rtol = 1e-9
+        end
+    end
+
+    @testset "sieve default is inclusion–exclusion" begin
+        rng = MersenneTwister(26)
+        A = randsym(rng, ComplexF64, 12)
+        # Distinct rows take inclusion–exclusion; repeated rows take Glynn. In both cases the
+        # default must be bit-identical to the variant the chooser names, not merely close.
+        @test hafnian(A; method = :sieve) === hafnian(A; method = :sieve, glynn = false)
+        @test hafnian(A; method = :sieve) !== hafnian(A; method = :sieve, glynn = true)
+        rpt = fill(2, 8)
+        R = randsym(rng, ComplexF64, 8)
+        @test TheEggman._choose_method(16, TheEggman.matched_reps(rpt)[2], 12).glynn
+        @test hafnian_repeated(R, rpt; method = :sieve) ===
+              hafnian_repeated(R, rpt; method = :sieve, glynn = true)
+
+        # It trades accuracy for speed, so bound how much: inclusion–exclusion cancels where Glynn
+        # does not, and the gap widens with N. These are the envelopes the docs quote.
+        setprecision(BigFloat, 256) do
+            for N in (16, 20, 24)
+                B = randsym(rng, ComplexF64, N)
+                gold = hafnian(Complex{BigFloat}.(B); method = :dp, nthreads = 1)
+                eg = abs(hafnian(B; method = :sieve, glynn = true) - gold) / abs(gold)
+                ei = abs(hafnian(B; method = :sieve, glynn = false) - gold) / abs(gold)
+                @test eg < 1e-12
+                @test ei < 1e-9          # loses digits, but stays far from unusable
+                @test ei >= eg           # and never beats Glynn
+            end
         end
     end
 
@@ -122,8 +150,8 @@ end
         setprecision(BigFloat, 256) do
             for N in (10, 14, 18)
                 A = randsym(rng, ComplexF64, N)
-                ref = hafnian(Complex{BigFloat}.(A); nthreads = 1, method = :sieve)
-                err = abs(hafnian(A; method = :sieve) - ref) / abs(ref)
+                ref = hafnian(Complex{BigFloat}.(A); nthreads = 1, method = :sieve, glynn = true)
+                err = abs(hafnian(A; method = :sieve, glynn = true) - ref) / abs(ref)
                 @test err < 1e-11
             end
         end
@@ -166,16 +194,16 @@ end
         rng = MersenneTwister(14)
         for N in 2:2:TheEggman.UNROLL_MAX
             A = randsym(rng, ComplexF64, N)
-            @test hafnian(A; method = :unrolled) ≈ hafnian(A; method = :sieve) rtol = 1e-10
-            @test hafnian(A; method = :dp) ≈ hafnian(A; method = :sieve) rtol = 1e-10
+            @test hafnian(A; method = :unrolled) ≈ hafnian(A; method = :sieve, glynn = true) rtol = 1e-10
+            @test hafnian(A; method = :dp) ≈ hafnian(A; method = :sieve, glynn = true) rtol = 1e-10
             R = randsym(rng, Float64, N)
-            @test hafnian(R; method = :unrolled) ≈ hafnian(R; method = :sieve) rtol = 1e-10
-            @test hafnian(R; method = :dp) ≈ hafnian(R; method = :sieve) rtol = 1e-10
+            @test hafnian(R; method = :unrolled) ≈ hafnian(R; method = :sieve, glynn = true) rtol = 1e-10
+            @test hafnian(R; method = :dp) ≈ hafnian(R; method = :sieve, glynn = true) rtol = 1e-10
         end
         # Above the unrolled cap only the DP and the sieve remain.
         for N in (14, 16, 18)
             A = randsym(rng, ComplexF64, N)
-            @test hafnian(A; method = :dp) ≈ hafnian(A; method = :sieve) rtol = 1e-9
+            @test hafnian(A; method = :dp) ≈ hafnian(A; method = :sieve, glynn = true) rtol = 1e-9
         end
         # Repeated indices exercise the same kernels through a different entry point, and are the
         # only case where the unrolled path reads the diagonal of `A`.
@@ -255,7 +283,7 @@ end
         # Layout is chosen by degree, and the wide one is never selected automatically.
         @test TheEggman._dp_index_type(TheEggman.DP_MAX) === Int32
         @test TheEggman._dp_index_type(TheEggman.DP_MAX + 2) === Int64
-        @test TheEggman._choose_method(34, ones(Int, 17), 12) === :sieve
+        @test TheEggman._choose_method(34, ones(Int, 17), 12).method === :sieve
         @test !TheEggman._prefer_dp(34, typemax(Int), 1)
 
         # ...but asking for it explicitly is allowed, right up to the bitmask width.
@@ -294,9 +322,9 @@ end
         setprecision(BigFloat, 256) do
             for N in (14, 18, 22)
                 A = randsym(rng, ComplexF64, N)
-                ref = hafnian(Complex{BigFloat}.(A); nthreads = 1, method = :sieve)
+                ref = hafnian(Complex{BigFloat}.(A); nthreads = 1, method = :sieve, glynn = true)
                 dp_err = abs(hafnian(A; method = :dp) - ref) / abs(ref)
-                sieve_err = abs(hafnian(A; method = :sieve) - ref) / abs(ref)
+                sieve_err = abs(hafnian(A; method = :sieve, glynn = true) - ref) / abs(ref)
                 @test dp_err < 1e-13
                 @test dp_err <= max(sieve_err, 1e-15)
             end
@@ -305,15 +333,15 @@ end
 
     @testset "method selection" begin
         # Distinct rows: unrolled up to its cap, then the DP up to its own.
-        @test TheEggman._choose_method(8, ones(Int, 4), 12) === :unrolled
-        @test TheEggman._choose_method(12, ones(Int, 6), 12) === :unrolled
-        @test TheEggman._choose_method(20, ones(Int, 10), 12) === :dp
-        @test TheEggman._choose_method(28, ones(Int, 14), 12) === :dp
-        @test TheEggman._choose_method(32, ones(Int, 16), 12) === :dp
-        @test TheEggman._choose_method(34, ones(Int, 17), 12) === :sieve   # past DP_MAX
+        @test TheEggman._choose_method(8, ones(Int, 4), 12).method === :unrolled
+        @test TheEggman._choose_method(12, ones(Int, 6), 12).method === :unrolled
+        @test TheEggman._choose_method(20, ones(Int, 10), 12).method === :dp
+        @test TheEggman._choose_method(28, ones(Int, 14), 12).method === :dp
+        @test TheEggman._choose_method(32, ones(Int, 16), 12).method === :dp
+        @test TheEggman._choose_method(34, ones(Int, 17), 12).method === :sieve   # past DP_MAX
         # Repetition is what makes the sieve cheap, so it takes over as reps grow.
-        @test TheEggman._choose_method(28, TheEggman.matched_reps(fill(2, 14))[2], 12) === :sieve
-        @test TheEggman._choose_method(16, TheEggman.matched_reps(fill(2, 8))[2], 12) === :dp
+        @test TheEggman._choose_method(28, TheEggman.matched_reps(fill(2, 14))[2], 12).method === :sieve
+        @test TheEggman._choose_method(16, TheEggman.matched_reps(fill(2, 8))[2], 12).method === :dp
         # Forcing a strategy it cannot serve is an error, not a silent fallback.
         A = randsym(MersenneTwister(16), ComplexF64, 16)
         @test_throws ArgumentError hafnian(A; method = :unrolled)
@@ -327,13 +355,15 @@ end
         # `_prefer_unrolled` compares two work counts whose units differ, so the threshold is a
         # calibration. Guard the two decisions it is actually calibrated against: enough repetition
         # shrinks the sieve below the unrolled kernel, a little does not.
+        bestwork(er) = min(TheEggman._sieve_variant_cost(er, sum(er), true)[1],
+                           TheEggman._sieve_variant_cost(er, sum(er), false)[1])
         heavy = TheEggman.matched_reps([6, 6])[2]
         light = TheEggman.matched_reps([5, 5, 1, 1])[2]
-        @test !TheEggman._prefer_unrolled(12, TheEggman._sieve_work(heavy))
-        @test TheEggman._prefer_unrolled(12, TheEggman._sieve_work(light))
+        @test !TheEggman._prefer_unrolled(12, bestwork(heavy))
+        @test TheEggman._prefer_unrolled(12, bestwork(light))
         # Distinct rows always favour the unrolled kernel, at every degree it covers.
         for N in 2:2:TheEggman.UNROLL_MAX
-            @test TheEggman._prefer_unrolled(N, TheEggman._sieve_work(ones(Int, N ÷ 2)))
+            @test TheEggman._prefer_unrolled(N, bestwork(ones(Int, N ÷ 2)))
         end
         # Nothing above the cap may claim an unrolled kernel.
         @test !TheEggman._prefer_unrolled(TheEggman.UNROLL_MAX + 2, typemax(Int))
