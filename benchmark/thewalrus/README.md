@@ -55,7 +55,7 @@ directory under `.benchmarks/`.
 The plot shows every individual sample as a jittered dot, with a bar at the median of each group
 and the median speedup annotated above it.
 
-Two things are worth knowing before trusting a single run:
+Three things are worth knowing before trusting a single run:
 
 - **Thermal coupling.** Both stages peg every core, so whichever runs second is measured on a
   hotter, lower-clocked CPU. `run_comparison.jl` idles for `--cooldown` seconds (default 30) before
@@ -65,3 +65,9 @@ Two things are worth knowing before trusting a single run:
   short runs, and this machine has both performance and efficiency cores, so an unlucky chunk
   assignment costs more than the kernel does. Medians and minima can differ by 2x on the same data.
   The relative ordering of the two libraries is stable across runs; the exact multiplier is not.
+- **Timer resolution.** The smallest cases run in tens of nanoseconds, so a single call is at or
+  below the granularity of `time_ns()` on some machines. `hafnian_bench.jl` calls `tune!` before
+  `run` so each sample averages over enough evaluations (hundreds, at N=4) to be resolution-
+  independent; without it those groups collapse onto the clock tick and onto BenchmarkTools'
+  0.001ns floor for samples that measure zero. Tuning is why the Julia stage spends its first
+  ~30s not reporting anything.

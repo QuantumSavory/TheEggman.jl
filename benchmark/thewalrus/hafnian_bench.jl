@@ -48,6 +48,9 @@ for N in NS
     SUITE["haf.eggman.rpt2.N=$N"] = @benchmarkable hafnian_repeated($A2, $rpt; check_symmetric=false)
 end
 
+# To prevent very fast samples from hitting the time_ns() granularity floor
+tune!(SUITE)
+
 results = run(SUITE)
 for name in sort(collect(keys(results)))
     println("$name:")
