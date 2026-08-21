@@ -167,8 +167,9 @@ hold and `TheEggman.empty_gpu_cache!()` releases it. Batches are not chunked aut
 KernelAbstractions exposes no portable free-memory query — use `TheEggman.dp_batch_bytes(N, T, B)`
 to size one, and pass `max_batch` if it will not fit.
 
-Measured on an RTX 4080 SUPER (16 GB, compute 8.9, fp64 at 1/64 rate), against a **single-threaded**
-CPU baseline — a fully threaded CPU would close some of these gaps, since the CPU DP scales about 4×:
+Measured on an RTX 4080 SUPER (16 GB, compute 8.9, fp64 at 1/64 rate). **These are against a
+single-threaded CPU baseline and are not a fair comparison** — the CPU DP scales about 4× across
+cores, so divide accordingly until a multi-threaded run replaces them:
 
 | N | single call | best batched | at |
 |---|---|---|---|

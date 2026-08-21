@@ -351,6 +351,41 @@ end
         @test_throws ArgumentError hafnian(randsym(MersenneTwister(17), ComplexF64, 66); method = :dp)
     end
 
+    @testset "strategy choice does not drift with thread count" begin
+        # A regression guard. The sieve used to be credited with a `min(nthreads, steps)`-fold
+        # speedup while the DP got none, so on a 32-thread machine every distinct-row problem
+        # flipped from `:dp` to `:sieve` — about 4x slower there, and it silently disabled the GPU
+        # path for anyone who passed a backend. Both speedups are now capped, so the same problem
+        # must resolve the same way whatever `nthreads` says.
+        for N in 14:2:TheEggman.DP_MAX
+            picks = [TheEggman._choose_method_distinct(N, N ÷ 2, nt).method
+                     for nt in (1, 2, 4, 8, 12, 32, 128, 1024)]
+            @test all(==(first(picks)), picks)
+            @test first(picks) === :dp        # distinct rows are always DP territory
+        end
+        for rpt in (fill(2, 10), fill(2, 14), fill(3, 6), fill(4, 6), [7, 7, 7, 7])
+            er = TheEggman.matched_reps(rpt)[2]
+            picks = [TheEggman._choose_method(sum(rpt), er, nt).method for nt in (1, 12, 32, 128)]
+            @test all(==(first(picks)), picks)
+            @test first(picks) === :sieve     # repetition keeps the sieve ahead at any thread count
+        end
+    end
+
+    @testset "a backend steers the strategy and is never ignored silently" begin
+        # Only the DP has a device path, so supplying a backend has to change the choice; the cost
+        # model compares CPU costs and cannot see the device. Silence here previously turned an
+        # entire GPU benchmark run into a CPU-vs-CPU comparison.
+        for nt in (1, 12, 32), N in (16, 20, 28, TheEggman.DP_MAX)
+            @test TheEggman._steer_backend(
+                TheEggman._choose_method_distinct(N, N ÷ 2, nt).method, :a_backend, N, :auto) === :dp
+        end
+        # Beyond what the DP covers the choice stands, but the caller is told.
+        @test (@test_logs (:warn,) TheEggman._steer_backend(:sieve, :a_backend, 36, :auto)) === :sieve
+        # No backend, no warning and no steering.
+        @test TheEggman._steer_backend(:sieve, nothing, 36, :auto) === :sieve
+        @test TheEggman._steer_backend(:unrolled, nothing, 8, :auto) === :unrolled
+    end
+
     @testset "unrolled crossover picks the faster path" begin
         # `_prefer_unrolled` compares two work counts whose units differ, so the threshold is a
         # calibration. Guard the two decisions it is actually calibrated against: enough repetition

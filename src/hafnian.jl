@@ -955,14 +955,56 @@ function _choose_method_distinct(K::Int, E::Int, nthreads::Int)
     return _decide(K, wg, sg, wi, si, E, E, nthreads)
 end
 
+"""
+Modelled ceiling on each strategy's parallel speedup.
+
+Neither scales with the core count: both are limited by memory rather than arithmetic, and on twelve
+threads the sieve reached ~5× and the DP ~4×. Treating the sieve as scaling linearly in `nthreads` —
+as this did originally — over-credits it more and more as the machine gets bigger, and on a 32-thread
+box it flipped every distinct-row problem from `:dp` to `:sieve`, which is roughly 4× slower there.
+Capping both makes the choice essentially thread-count independent, which is the property worth
+having: the same problem should not change strategy because somebody exported `JULIA_NUM_THREADS`.
+"""
+const _SIEVE_PARALLEL_CAP = 5
+const _DP_PARALLEL_CAP = 4
+
+@inline _sieve_speedup(nthreads::Int, steps::Int) = max(1, min(nthreads, steps, _SIEVE_PARALLEL_CAP))
+@inline _dp_speedup(nthreads::Int) = max(1, min(nthreads, _DP_PARALLEL_CAP))
+
 function _decide(K::Int, wg::Int, sg::Int, wi::Int, si::Int, E::Int, n::Int, nthreads::Int)
     glynn = _best_sieve_variant(wg, wi)
     work, steps = glynn ? (wg, sg) : (wi, si)
-    nchunks = _sieve_chunks(work, steps, nthreads)
-    effective = work ÷ max(nchunks, 1)
+    # The sieve only actually threads once it is big enough to be worth chunking.
+    parallel = _sieve_chunks(work, steps, nthreads) > 1
+    effective = parallel ? work ÷ _sieve_speedup(nthreads, steps) : work
     _prefer_unrolled(K, effective) && return (method = :unrolled, glynn = glynn)
-    _prefer_dp(K, work, nchunks) && return (method = :dp, glynn = glynn)
+    _prefer_dp(K, effective, parallel ? nthreads : 1) && return (method = :dp, glynn = glynn)
     return (method = :sieve, glynn = glynn)
+end
+
+"""
+    _steer_backend(chosen, glynn, backend, K) -> Symbol
+
+Reconcile the cost-model's choice with the presence of a GPU backend.
+
+Only the DP has a device path, so a backend genuinely changes which strategy is right — the cost
+model compares CPU costs and cannot see the device at all. When the caller supplies a backend and
+has not forced a `method`, the DP is used wherever the degree allows it.
+
+The warning matters as much as the steering. Before this existed, a backend that could not be used
+was ignored in silence: on a 32-thread machine the cost model flipped every distinct-row problem to
+`:sieve`, so an entire GPU benchmark run measured the CPU sieve against itself and reported ~1.0×
+speedups with sieve-level accuracy. Silence turned a one-line policy gap into a whole invalid run.
+"""
+function _steer_backend(chosen::Symbol, backend, K::Int, method::Symbol)
+    backend === nothing && return chosen
+    method === :auto && K <= DP_MAX && return :dp
+    if chosen !== :dp
+        @warn "`backend` was given but the $(chosen === :unrolled ? "unrolled kernel" : "sieve") " *
+              "was selected, which has no device path; this call ran on the CPU. Degree $K, " *
+              "method=:$method." maxlog = 1
+    end
+    return chosen
 end
 
 # Expanded index list `idx` with row `i` repeated `rpt[i]` times, as both direct kernels want it.
@@ -1082,7 +1124,7 @@ function hafnian(
     # directly avoids allocating the vector on the paths that never sieve.
     E = N ÷ 2
     sel = _choose_method_distinct(N, E, nthreads)
-    chosen = method === :auto ? sel.method : method
+    chosen = _steer_backend(method === :auto ? sel.method : method, backend, N, method)
     use_glynn = glynn === nothing ? sel.glynn : glynn
     if chosen === :unrolled
         # Distinct rows in their natural order, so no index vector needs materialising.
@@ -1168,7 +1210,7 @@ function hafnian_repeated(
 
     x, edge_reps = matched_reps(rpt)
     sel = _choose_method(total, edge_reps, nthreads)
-    chosen = method === :auto ? sel.method : method
+    chosen = _steer_backend(method === :auto ? sel.method : method, backend, total, method)
     use_glynn = glynn === nothing ? sel.glynn : glynn
     if chosen !== :sieve
         return _haf_direct_method(T, chosen, A, _expanded_indices(rpt, total), nthreads, backend)
@@ -1240,7 +1282,8 @@ function hafnian(
     isodd(N) && return fill(zero(T), B)
     _check_method(method, N)
 
-    chosen = method === :auto ? _choose_method_distinct(N, N ÷ 2, nthreads).method : method
+    chosen = _steer_backend(method === :auto ? _choose_method_distinct(N, N ÷ 2, nthreads).method :
+                            method, backend, N, method)
     if backend !== nothing && chosen === :dp
         idxs = fill(Base.OneTo(N), B)
         P = _gather_pairs_batch(T, As, idxs, N)
