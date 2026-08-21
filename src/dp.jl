@@ -415,10 +415,7 @@ function _haf_dp(
     length(idx) == K || throw(DimensionMismatch("idx has length $(length(idx)), plan expects $K"))
 
     # Gather the upper triangle once; every transition then reads a matrix entry by flat index.
-    P = Vector{T}(undef, K * (K - 1) ÷ 2)
-    @inbounds for i in 1:K-1, j in i+1:K
-        P[_pair_index(i, j, K)] = A[idx[i], idx[j]]
-    end
+    P = _gather_pairs!(Vector{T}(undef, K * (K - 1) ÷ 2), A, idx, K)
 
     H = Vector{T}(undef, plan.nstates)
     @inbounds H[1] = one(T)            # the empty set
@@ -442,6 +439,145 @@ function _haf_dp(
         end
     end
     return @inbounds H[plan.nstates]   # the full set, sorted last
+end
+
+"""
+    _gather_pairs!(P, A, idx, K) -> P
+
+Fill `P` with the flattened upper triangle of `A[idx, idx]`, laid out by [`_pair_index`](@ref).
+
+This is the only place the kernels touch the caller's matrix: afterwards every transition reads a
+matrix entry by flat index, which is what lets the evaluation be a pure gather over `P` and `H`.
+"""
+function _gather_pairs!(
+    P::AbstractVector,
+    A::AbstractMatrix,
+    idx::AbstractVector{<:Integer},
+    K::Int,
+)
+    @inbounds for i in 1:K-1, j in i+1:K
+        P[_pair_index(i, j, K)] = A[idx[i], idx[j]]
+    end
+    return P
+end
+
+"""
+    _gather_pairs_batch(T, A, idxs, K) -> Matrix{T}
+    _gather_pairs_batch(T, As, idxs, K) -> Matrix{T}
+
+Gather one batch of instances into a `B × npairs` matrix — **instance index first**, so it is the
+fastest-varying one.
+
+That layout is the point of batching on a GPU. A warp handling 32 consecutive instances of the same
+state reads one contiguous run of `P` (and of `H`, laid out the same way), while the transition it
+is following is a single value broadcast across the warp. A `npairs × B` layout would scatter every
+one of those reads.
+
+The first form shares one matrix across instances that differ only in `idxs` — the Gaussian
+boson-sampling case, where the batch is many photon patterns against a single `A`.
+"""
+function _gather_pairs_batch(
+    ::Type{T},
+    A::AbstractMatrix,
+    idxs::AbstractVector{<:AbstractVector{<:Integer}},
+    K::Int,
+) where {T}
+    B = length(idxs)
+    P = Matrix{T}(undef, B, K * (K - 1) ÷ 2)
+    @inbounds for b in 1:B
+        idx = idxs[b]
+        for i in 1:K-1, j in i+1:K
+            P[b, _pair_index(i, j, K)] = A[idx[i], idx[j]]
+        end
+    end
+    return P
+end
+
+function _gather_pairs_batch(
+    ::Type{T},
+    As::AbstractVector{<:AbstractMatrix},
+    idxs::AbstractVector{<:AbstractVector{<:Integer}},
+    K::Int,
+) where {T}
+    B = length(idxs)
+    P = Matrix{T}(undef, B, K * (K - 1) ÷ 2)
+    @inbounds for b in 1:B
+        A = As[b]
+        idx = idxs[b]
+        for i in 1:K-1, j in i+1:K
+            P[b, _pair_index(i, j, K)] = A[idx[i], idx[j]]
+        end
+    end
+    return P
+end
+
+"""
+    _haf_dp_backend(backend, P, plan) -> Vector
+
+Evaluate a whole batch of degree-`plan.K` hafnians on `backend`, given the gathered pair matrix `P`
+from [`_gather_pairs_batch`](@ref).
+
+This is a hook with no method in the base package: loading `KernelAbstractions` brings in
+`ext/TheEggmanKernelAbstractionsExt.jl`, which adds the method that actually runs. Keeping it out of
+the base package keeps `TheEggman` dependent on nothing but `LinearAlgebra`, which matters because
+its downstream consumers are CPU-only.
+"""
+function _haf_dp_backend end
+
+# Reached only if someone conjures a backend without KernelAbstractions loaded, which should be
+# impossible in practice; a named error still beats a MethodError.
+_haf_dp_backend(backend, P, plan; kwargs...) = throw(ArgumentError(
+    "no GPU backend method for $(typeof(backend)); run `using KernelAbstractions` (and a backend " *
+    "package such as CUDA.jl) before passing `backend`"))
+
+# Device-resident copies of plans, populated by the KernelAbstractions extension and keyed by
+# (backend, degree, layout). The cache lives here rather than in the extension so that its lifecycle
+# is inspectable without a GPU loaded, and so the extension adds methods rather than overwriting any.
+const _DEVICE_PLANS = Dict{Any,Any}()
+const _DEVICE_PLAN_LOCK = ReentrantLock()
+
+"""
+    gpu_cache_bytes() -> Int
+
+Device memory held by cached DP plans, across every backend. Zero until a GPU plan is built.
+
+Plans are never evicted — they are pure functions of the degree and expensive to rebuild — so at
+`N = 32` this reaches ~196 MB per backend. [`empty_gpu_cache!`](@ref) releases it.
+"""
+function gpu_cache_bytes()
+    lock(_DEVICE_PLAN_LOCK) do
+        total = 0
+        for (_, dev) in _DEVICE_PLANS, arr in dev
+            total += length(arr) * sizeof(eltype(arr))
+        end
+        return total
+    end
+end
+
+"""
+    empty_gpu_cache!()
+
+Drop every cached device plan, releasing its memory. Later calls re-upload on demand.
+"""
+function empty_gpu_cache!()
+    lock(_DEVICE_PLAN_LOCK) do
+        empty!(_DEVICE_PLANS)
+    end
+    return nothing
+end
+
+"""
+    dp_batch_bytes(N, T, B) -> Int
+
+Device memory one batch needs, excluding the shared plan: the `B × nstates` state array plus the
+`B × npairs` gathered pairs.
+
+`KernelAbstractions` exposes no portable free-memory query, so batches are not chunked
+automatically — pass `max_batch` to [`hafnian`](@ref) if a batch will not fit. Use this to size it.
+"""
+function dp_batch_bytes(N::Int, ::Type{T}, B::Int) where {T}
+    nstates, _ = _dp_counts(N)
+    return B * (nstates + N * (N - 1) ÷ 2) * sizeof(T)
 end
 
 """

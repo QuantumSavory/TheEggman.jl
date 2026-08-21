@@ -54,6 +54,24 @@ Matrices are read in place — views and `Symmetric` wrappers are never copied �
 Symmetry is validated on every call, which is `O(N²)` and so a noticeable fraction of the total at
 small `N`; `check_symmetric=false` skips it for callers that already know their input is symmetric.
 
+## Batches and GPUs
+
+Both entry points take batches, which on a GPU is what makes the port worthwhile:
+
+```julia
+hafnian(As)                                        # a vector of equally-sized matrices
+hafnian_repeated(A, rpts)                          # one matrix, many repetition patterns
+hafnian(As; backend = CUDABackend())               # ...on a GPU
+```
+
+Loading `KernelAbstractions` (with a backend package such as CUDA.jl) enables `backend`, which runs
+the subset DP on the device; every other strategy falls back to the CPU. Results are bit-identical
+to the CPU path. Passing `ComplexF32` matrices halves the memory traffic for about seven digits of
+accuracy — worthwhile on consumer cards, where `Float64` runs at a fraction of `Float32` rate.
+
+`TheEggman.gpu_cache_bytes()`, `TheEggman.empty_gpu_cache!()` and `TheEggman.dp_batch_bytes` manage
+the device-side plan cache and batch sizing.
+
 Loop hafnians are not implemented yet.
 
 ## Index

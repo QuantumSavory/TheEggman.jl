@@ -1,0 +1,7 @@
+[deps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+TheEggman = "d2b1023c-e65d-4dc8-8fde-b4ef6c929f77"

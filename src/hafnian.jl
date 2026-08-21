@@ -983,14 +983,26 @@ function _haf_direct_method(
     A::AbstractMatrix,
     idx::AbstractVector{Int},
     nthreads::Int,
+    backend = nothing,
 ) where {T}
     Am = _kernel_matrix(T, A)
     if method === :unrolled
+        # Tens of nanoseconds of straight-line code: a kernel launch alone would cost more, so a
+        # backend is ignored here rather than honoured.
         return T(_haf_direct(Am, idx))
     end
     # Branch on the plan layout so each call is concretely typed; a single `_dp_plan(K)` would be
     # abstractly typed and cost an inferrable return type. See `_dp_index_type`.
     K = length(idx)
+    if backend !== nothing
+        # One instance is the degenerate batch. Sharing the batched path keeps a single kernel.
+        P = _gather_pairs_batch(T, Am, [idx], K)
+        if K <= DP_MAX
+            return T(_haf_dp_backend(backend, P, _dp_plan(K, Int32))[1])
+        else
+            return T(_haf_dp_backend(backend, P, _dp_plan(K, Int64))[1])
+        end
+    end
     if K <= DP_MAX
         return T(_haf_dp(Am, idx, _dp_plan(K, Int32); nthreads))
     else
@@ -1057,6 +1069,7 @@ function hafnian(
     glynn::Union{Nothing,Bool} = nothing,
     method::Symbol = :auto,
     check_symmetric::Bool = true,
+    backend = nothing,
 )
     N = LinearAlgebra.checksquare(A)
     T = _haf_eltype(A)
@@ -1076,7 +1089,7 @@ function hafnian(
         return T(_haf_unrolled_range(_kernel_matrix(T, A), N))
     elseif chosen === :dp
         # `1:N` rather than a materialised vector: the kernels only ever index it.
-        return _haf_direct_method(T, :dp, A, Base.OneTo(N), nthreads)
+        return _haf_direct_method(T, :dp, A, Base.OneTo(N), nthreads, backend)
     end
 
     # Match vertex 2i-1 with 2i, then reorder into the [first halves; second halves] layout.
@@ -1140,6 +1153,7 @@ function hafnian_repeated(
     glynn::Union{Nothing,Bool} = nothing,
     method::Symbol = :auto,
     check_symmetric::Bool = true,
+    backend = nothing,
 )
     N = LinearAlgebra.checksquare(A)
     length(rpt) == N || throw(DimensionMismatch("rpt has length $(length(rpt)), expected $N"))
@@ -1157,9 +1171,145 @@ function hafnian_repeated(
     chosen = method === :auto ? sel.method : method
     use_glynn = glynn === nothing ? sel.glynn : glynn
     if chosen !== :sieve
-        return _haf_direct_method(T, chosen, A, _expanded_indices(rpt, total), nthreads)
+        return _haf_direct_method(T, chosen, A, _expanded_indices(rpt, total), nthreads, backend)
     end
     return _calc_hafnian(_permuted(T, A, x), edge_reps; nthreads, glynn = use_glynn)
+end
+
+# Evaluate `f(b)` for `b in 1:B` into `out`, spread across tasks when that is worth it. Each
+# instance runs single-threaded, so the two levels of parallelism never oversubscribe.
+function _batch_cpu!(f, out::Vector{T}, B::Int, nthreads::Int) where {T}
+    nchunks = min(nthreads, B)
+    if nchunks <= 1
+        @inbounds for b in 1:B
+            out[b] = f(b)
+        end
+        return out
+    end
+    @sync for c in 1:nchunks
+        lo = div((c - 1) * B, nchunks) + 1
+        hi = div(c * B, nchunks)
+        lo <= hi && @spawn for b in lo:hi
+            @inbounds out[b] = f(b)
+        end
+    end
+    return out
+end
+
+_batch_eltype(As::AbstractVector{<:AbstractMatrix}) = float(eltype(eltype(As)))
+
+"""
+    hafnian(As; backend=nothing, kwargs...) -> Vector
+
+Hafnians of a batch of equally-sized matrices, returned in order.
+
+Every matrix must be the same size, since a batch shares one strategy and — on a GPU — one plan.
+Without `backend` this is a threaded loop over [`hafnian`](@ref) and accepts all its keywords.
+
+With `backend` set to a `KernelAbstractions` backend it becomes one batched GPU evaluation, which is
+where batching earns its keep: the instance axis is the fastest-varying one in the device layout, so
+a warp covering 32 instances of the same subproblem reads contiguous memory, and the per-level
+kernel launches are amortised across the whole batch rather than paid per hafnian. Requires
+`KernelAbstractions` (and a backend package) to be loaded, and falls back to the threaded loop for
+any degree the subset DP does not cover.
+
+See also [`hafnian_repeated`](@ref), which batches many repetition patterns against one matrix.
+"""
+function hafnian(
+    As::AbstractVector{<:AbstractMatrix};
+    nthreads::Int = nthreads(),
+    glynn::Union{Nothing,Bool} = nothing,
+    method::Symbol = :auto,
+    check_symmetric::Bool = true,
+    backend = nothing,
+    max_batch::Union{Nothing,Int} = nothing,
+)
+    T = _batch_eltype(As)
+    B = length(As)
+    B == 0 && return T[]
+
+    N = LinearAlgebra.checksquare(first(As))
+    for (b, A) in enumerate(As)
+        LinearAlgebra.checksquare(A) == N ||
+            throw(DimensionMismatch("matrix $b is $(size(A, 1))×$(size(A, 2)), expected $N×$N; a " *
+                                    "batch shares one strategy and one plan"))
+        check_symmetric ? _check_symmetric(A) : Base.require_one_based_indexing(A)
+    end
+
+    N == 0 && return fill(one(T), B)
+    isodd(N) && return fill(zero(T), B)
+    _check_method(method, N)
+
+    chosen = method === :auto ? _choose_method_distinct(N, N ÷ 2, nthreads).method : method
+    if backend !== nothing && chosen === :dp
+        idxs = fill(Base.OneTo(N), B)
+        P = _gather_pairs_batch(T, As, idxs, N)
+        return N <= DP_MAX ? _haf_dp_backend(backend, P, _dp_plan(N, Int32); max_batch) :
+                             _haf_dp_backend(backend, P, _dp_plan(N, Int64); max_batch)
+    end
+
+    out = Vector{T}(undef, B)
+    return _batch_cpu!(out, B, nthreads) do b
+        hafnian(As[b]; nthreads = 1, glynn, method, check_symmetric = false)
+    end
+end
+
+"""
+    hafnian_repeated(A, rpts; backend=nothing, kwargs...) -> Vector
+
+Hafnians of one matrix under many repetition patterns, returned in order.
+
+This is the Gaussian boson-sampling shape: a single `A`, one `rpt` per photon pattern. Every pattern
+must have the same total `sum(rpt)`, because that total is the degree and a batch shares one plan —
+a mismatch throws and names the offending index. Group patterns by total if they differ.
+
+Without `backend` this is a threaded loop over [`hafnian_repeated`](@ref), so each pattern still
+picks its own strategy. With `backend` the whole batch runs the subset DP on the GPU, since one
+shared plan is what makes batching worth doing; for heavily repeated patterns the CPU sieve may
+still be faster, so compare before assuming the GPU wins.
+"""
+function hafnian_repeated(
+    A::AbstractMatrix,
+    rpts::AbstractVector{<:AbstractVector{<:Integer}};
+    nthreads::Int = nthreads(),
+    glynn::Union{Nothing,Bool} = nothing,
+    method::Symbol = :auto,
+    check_symmetric::Bool = true,
+    backend = nothing,
+    max_batch::Union{Nothing,Int} = nothing,
+)
+    T = _haf_eltype(A)
+    B = length(rpts)
+    B == 0 && return T[]
+
+    N = LinearAlgebra.checksquare(A)
+    total = Int(sum(first(rpts); init = 0))
+    for (b, rpt) in enumerate(rpts)
+        length(rpt) == N ||
+            throw(DimensionMismatch("rpt $b has length $(length(rpt)), expected $N"))
+        any(<(0), rpt) && throw(ArgumentError("rpt $b contains a negative entry"))
+        Int(sum(rpt; init = 0)) == total ||
+            throw(ArgumentError("rpt $b sums to $(Int(sum(rpt; init = 0))), but rpt 1 sums to " *
+                                "$total; a batch shares one plan, so every pattern must have the " *
+                                "same total"))
+    end
+    check_symmetric ? _check_symmetric(A) : Base.require_one_based_indexing(A)
+
+    total == 0 && return fill(one(T), B)
+    isodd(total) && return fill(zero(T), B)
+    _check_method(method, total)
+
+    if backend !== nothing && method in (:auto, :dp) && total <= DP_HARD_MAX
+        idxs = [_expanded_indices(rpt, total) for rpt in rpts]
+        P = _gather_pairs_batch(T, A, idxs, total)
+        return total <= DP_MAX ? _haf_dp_backend(backend, P, _dp_plan(total, Int32); max_batch) :
+                                 _haf_dp_backend(backend, P, _dp_plan(total, Int64); max_batch)
+    end
+
+    out = Vector{T}(undef, B)
+    return _batch_cpu!(out, B, nthreads) do b
+        hafnian_repeated(A, rpts[b]; nthreads = 1, glynn, method, check_symmetric = false)
+    end
 end
 
 """

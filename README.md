@@ -125,6 +125,47 @@ measured) — since they sum products of matrix entries with no cancellation at 
 with `thewalrus` to ~1e-14 relative where a direct strategy runs, and to ~1e-12 where the default
 sieve does.
 
+## GPU
+
+The subset DP runs on a GPU through [KernelAbstractions.jl](https://github.com/JuliaGPU/KernelAbstractions.jl),
+as an opt-in package extension — the base package still depends on nothing but `LinearAlgebra`:
+
+```julia
+using TheEggman, CUDA, KernelAbstractions
+
+hafnian(A; backend = CUDABackend())                  # one hafnian
+hafnian(As; backend = CUDABackend())                 # a batch of matrices
+hafnian_repeated(A, rpts; backend = CUDABackend())   # one matrix, many photon patterns
+```
+
+Only the DP is ported, because only the DP is worth porting: it is memory-bandwidth-bound rather
+than compute-bound, which is the shape a GPU improves. The unrolled kernels finish in tens of
+nanoseconds — less than a single kernel launch — and a sieve term needs roughly a 40 KB workspace,
+which would leave almost no occupancy. Anything the DP does not cover falls back to the CPU
+automatically.
+
+**Batching is the point, not a convenience.** `P` and `H` are laid out with the instance index
+fastest-varying, so a warp covering 32 instances of the same subproblem reads contiguous memory and
+follows a single broadcast transition; the other layout would scatter every access. It also
+amortises the `N/2` kernel launches each call needs across the whole batch instead of paying them
+per hafnian, which is what makes moderate `N` worth sending to a GPU at all.
+
+Results are **bit-identical** to the CPU, not merely close: each state is summed by one thread in
+plan order, the same order the CPU uses.
+
+`ComplexF32` needs no separate API — pass a `ComplexF32` matrix. It costs about seven digits and,
+because the DP never cancels, that error stays near fp32 epsilon instead of growing with `N`
+(measured 2–5e-7 across N=12–24, flat). On consumer cards, where fp64 runs at 1/32–1/64 rate, this
+is usually the right default.
+
+Plans are uploaded once per degree and cached; `TheEggman.gpu_cache_bytes()` reports the VRAM they
+hold and `TheEggman.empty_gpu_cache!()` releases it. Batches are not chunked automatically, since
+KernelAbstractions exposes no portable free-memory query — use `TheEggman.dp_batch_bytes(N, T, B)`
+to size one, and pass `max_batch` if it will not fit.
+
+See [`benchmark/gpu/README.md`](benchmark/gpu/README.md) for the validation script, which also runs
+without a GPU in a dry-run mode.
+
 ## Benchmarks
 
 ```sh

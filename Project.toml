@@ -6,13 +6,21 @@ version = "0.1.0-DEV"
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 
+[weakdeps]
+KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
+
+[extensions]
+TheEggmanKernelAbstractionsExt = "KernelAbstractions"
+
 [compat]
+KernelAbstractions = "0.9"
 LinearAlgebra = "1"
 julia = "1.12"
 
 [extras]
+KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test", "Random"]
+test = ["Test", "Random", "KernelAbstractions"]

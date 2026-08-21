@@ -5,3 +5,4 @@
 /.benchmarks/
 /benchmark/competitors/.venv/
 __pycache__/
+/benchmark/gpu/gpu-validation.json

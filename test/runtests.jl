@@ -557,4 +557,12 @@ end
         # 4× the terms and a larger workspace, but nothing that scales with the term count.
         @test grown < 6 * base
     end
+    # The KernelAbstractions extension, exercised on its CPU backend. Skipped only if KA is somehow
+    # unavailable; it is in the test target, so normally this always runs.
+    if Base.find_package("KernelAbstractions") !== nothing
+        include("gpu.jl")
+    else
+        @warn "KernelAbstractions not available; skipping GPU-backend tests"
+    end
+
 end
