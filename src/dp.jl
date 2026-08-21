@@ -528,7 +528,7 @@ function _haf_dp_backend end
 # impossible in practice; a named error still beats a MethodError.
 _haf_dp_backend(backend, P, plan; kwargs...) = throw(ArgumentError(
     "no GPU backend method for $(typeof(backend)); run `using KernelAbstractions` (and a backend " *
-    "package such as AMDGPU.jl or CUDA.jl) before passing `backend`"))
+    "package such as CUDA.jl) before passing `backend`"))
 
 # Device-resident copies of plans, populated by the KernelAbstractions extension and keyed by
 # (backend, degree, layout). The cache lives here rather than in the extension so that its lifecycle

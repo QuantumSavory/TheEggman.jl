@@ -131,11 +131,11 @@ The subset DP runs on a GPU through [KernelAbstractions.jl](https://github.com/J
 as an opt-in package extension — the base package still depends on nothing but `LinearAlgebra`:
 
 ```julia
-using TheEggman, AMDGPU, KernelAbstractions        # or CUDA, or any other KA backend
+using TheEggman, CUDA, KernelAbstractions
 
-hafnian(A; backend = ROCBackend())                   # one hafnian
-hafnian(As; backend = ROCBackend())                  # a batch of matrices
-hafnian_repeated(A, rpts; backend = ROCBackend())    # one matrix, many photon patterns
+hafnian(A; backend = CUDABackend())                  # one hafnian
+hafnian(As; backend = CUDABackend())                 # a batch of matrices
+hafnian_repeated(A, rpts; backend = CUDABackend())   # one matrix, many photon patterns
 ```
 
 Only the DP is ported, because only the DP is worth porting: it is memory-bandwidth-bound rather
@@ -145,8 +145,8 @@ which would leave almost no occupancy. Anything the DP does not cover falls back
 automatically.
 
 **Batching is the point, not a convenience.** `P` and `H` are laid out with the instance index
-fastest-varying, so a wavefront covering 32 or 64 instances of the same subproblem reads contiguous
-memory and follows a single broadcast transition; the other layout would scatter every access. It also
+fastest-varying, so a warp covering 32 instances of the same subproblem reads contiguous memory and
+follows a single broadcast transition; the other layout would scatter every access. It also
 amortises the `N/2` kernel launches each call needs across the whole batch instead of paying them
 per hafnian, which is what makes moderate `N` worth sending to a GPU at all.
 
@@ -155,9 +155,8 @@ plan order, the same order the CPU uses.
 
 `ComplexF32` needs no separate API — pass a `ComplexF32` matrix. It costs about seven digits and,
 because the DP never cancels, that error stays near fp32 epsilon instead of growing with `N`
-(measured 2–5e-7 across N=12–24, flat). Whether it is worth it depends on the card: AMD CDNA compute
-parts run `Float64` at roughly half to full `Float32` rate, while RDNA consumer parts run it at
-~1/32, where `ComplexF32` is usually the right default.
+(measured 2–5e-7 across N=12–24, flat). On consumer cards, where fp64 runs at 1/32–1/64 rate, this
+is usually the right default.
 
 Plans are uploaded once per degree and cached; `TheEggman.gpu_cache_bytes()` reports the VRAM they
 hold and `TheEggman.empty_gpu_cache!()` releases it. Batches are not chunked automatically, since

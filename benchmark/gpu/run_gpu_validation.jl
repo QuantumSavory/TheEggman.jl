@@ -17,21 +17,7 @@ const QUICK = "--quick" in ARGS
 # queries. The performance numbers are then meaningless, but it exercises the whole script end to
 # end, so it can be smoke-tested on a machine with no GPU before being run for real.
 const DRYRUN = get(ENV, "EGGMAN_GPU_DRYRUN", "0") == "1"
-
-# AMD by default. EGGMAN_GPU_VENDOR=cuda switches to NVIDIA, which also needs CUDA added to this
-# project — it is deliberately not a dependency, so an AMD machine never downloads CUDA artifacts.
-const VENDOR = Symbol(lowercase(get(ENV, "EGGMAN_GPU_VENDOR", "amd")))
-VENDOR in (:amd, :cuda) || error("EGGMAN_GPU_VENDOR must be `amd` or `cuda`, got $VENDOR")
-if !DRYRUN
-    if VENDOR === :amd
-        @eval using AMDGPU
-    else
-        Base.find_package("CUDA") === nothing &&
-            error("EGGMAN_GPU_VENDOR=cuda needs CUDA in this project: " *
-                  "julia --project=benchmark/gpu -e 'using Pkg; Pkg.add(\"CUDA\")'")
-        @eval using CUDA
-    end
-end
+DRYRUN || @eval using CUDA
 
 const RESULTS = Dict{String,Any}()
 
@@ -50,46 +36,9 @@ if DRYRUN
         "fp64_fp32_ratio_hint" => "n/a",
         "vram_total_GB" => round(Sys.total_memory() / 2^30, digits = 2),
         "vram_free_GB" => round(Sys.free_memory() / 2^30, digits = 2),
-        "multiprocessors" => 0, "shared_mem_per_block_KB" => 0, "wavefront_size" => 0,
+        "multiprocessors" => 0, "shared_mem_per_block_KB" => 0,
         "shared_mem_per_sm_KB" => smem_per_sm() ÷ 1024,
-        "gpu_pkg" => "n/a", "driver" => "n/a")
-elseif VENDOR === :amd
-    backend() = AMDGPU.ROCBackend()
-    devsync() = AMDGPU.synchronize()
-    avail_mem() = AMDGPU.info()[1]                  # (free, total) in bytes
-    reclaim!() = AMDGPU.reclaim()
-    functional() = AMDGPU.functional()
-    # LDS per compute unit is AMD's equivalent of shared memory per SM, and is what bounds how many
-    # sieve terms could ever be resident. 64 KB on GCN/CDNA, 128 KB per WGP on RDNA3.
-    smem_per_sm() = Int(AMDGPU.HIP.properties(AMDGPU.device()).maxSharedMemoryPerMultiProcessor)
-    function device_info()
-        dev = AMDGPU.device()
-        arch = String(AMDGPU.HIP.gcn_arch(dev))
-        props = AMDGPU.HIP.properties(dev)
-        # fp64 rate is the single most important number for reading stage C3, and on AMD it splits
-        # hard by product line rather than by generation: CDNA compute parts run fp64 at full or
-        # half rate, RDNA consumer parts at 1/32 or worse.
-        hint = if any(startswith(arch, p) for p in ("gfx908", "gfx90a", "gfx940", "gfx941", "gfx942"))
-            "CDNA compute part: fp64 at ~1/1-1/2 of fp32 — ComplexF64 is cheap here"
-        elseif startswith(arch, "gfx906")
-            "Vega20: fp64 at ~1/2"
-        elseif startswith(arch, "gfx10") || startswith(arch, "gfx11") || startswith(arch, "gfx12")
-            "RDNA consumer part: fp64 at ~1/32 — prefer ComplexF32"
-        else
-            "unknown for $arch"
-        end
-        Dict{String,Any}(
-            "device" => String(AMDGPU.HIP.name(dev)), "capability" => arch,
-            "wavefront_size" => Int(AMDGPU.HIP.wavefrontsize(dev)),
-            "fp64_fp32_ratio_hint" => hint,
-            "vram_total_GB" => round(AMDGPU.info()[2] / 2^30, digits = 2),
-            "vram_free_GB" => round(AMDGPU.info()[1] / 2^30, digits = 2),
-            "multiprocessors" => Int(props.multiProcessorCount),
-            "shared_mem_per_block_KB" => Int(props.sharedMemPerBlock) ÷ 1024,
-            "shared_mem_per_sm_KB" => smem_per_sm() ÷ 1024,
-            "gpu_pkg" => "AMDGPU " * string(pkgversion(AMDGPU)),
-            "driver" => (try string(AMDGPU.HIP.runtime_version()) catch; "unknown" end))
-    end
+        "cuda_jl" => "n/a", "driver" => "n/a")
 else
     backend() = CUDA.CUDABackend()
     devsync() = CUDA.synchronize()
@@ -101,12 +50,13 @@ else
     function device_info()
         dev = CUDA.device()
         cap = CUDA.capability(dev)
+        # The fp64:fp32 ratio is fixed per architecture and is the single most important number for
+        # reading stage C3: 1/2 on datacenter parts, 1/32 or worse on consumer ones.
         hint = get(Dict(6 => "1/2 (P100) or 1/32", 7 => "1/2 (V100) or 1/32 (Turing)",
                         8 => "1/2 (A100) or 1/64 (Ampere consumer)", 9 => "1/2 (H100)",
                         10 => "consumer: ~1/64"), cap.major, "unknown")
         Dict{String,Any}(
             "device" => CUDA.name(dev), "capability" => string(cap),
-            "wavefront_size" => 32,
             "fp64_fp32_ratio_hint" => hint,
             "vram_total_GB" => round(CUDA.totalmem(dev) / 2^30, digits = 2),
             "vram_free_GB" => round(CUDA.available_memory() / 2^30, digits = 2),
@@ -114,7 +64,7 @@ else
             "shared_mem_per_block_KB" =>
                 CUDA.attribute(dev, CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK) ÷ 1024,
             "shared_mem_per_sm_KB" => smem_per_sm() ÷ 1024,
-            "gpu_pkg" => "CUDA " * string(pkgversion(CUDA)),
+            "cuda_jl" => string(pkgversion(CUDA)),
             "driver" => (try string(CUDA.driver_version()) catch; "unknown" end))
     end
 end
@@ -138,12 +88,11 @@ section(name) = (println("\n", "="^78); println(name); println("="^78); flush(st
 section("A. Environment")
 
 if !functional()
-    @error "$(VENDOR == :amd ? "AMDGPU" : "CUDA") is not functional here; nothing below can run."
+    @error "CUDA is not functional here; nothing below can run."
     exit(1)
 end
 env = device_info()
 env["ka_jl"] = string(pkgversion(KernelAbstractions))
-env["vendor"] = string(VENDOR)
 env["julia"] = string(VERSION)
 env["nthreads"] = Threads.nthreads()
 env["dryrun"] = DRYRUN
@@ -354,8 +303,7 @@ section("E. Sieve viability — measurement only, no sieve GPU code exists")
 
 # A sieve term needs a private workspace: the m x m working matrix, its split real/imaginary copies,
 # and the (m+1) x (n+1) characteristic-polynomial table. At m = 32 that is roughly 40 KB, which is
-# why the sieve was not ported — it would leave almost no occupancy. On AMD the relevant budget is
-# LDS per compute unit (64 KB on GCN/CDNA, 128 KB per WGP on RDNA3), which is what is reported here.
+# why the sieve was not ported — it would leave almost no occupancy.
 smem_sm = smem_per_sm()
 m, n = 32, 16
 ws_bytes = (m * m * 16) + 2 * (m * m * 8) + ((m + 1) * (n + 1) * 16)
@@ -364,8 +312,8 @@ verdict = terms_per_sm >= 2 ? "worth investigating" : "do not build"
 RESULTS["E_sieve"] = Dict("workspace_bytes_m32" => ws_bytes, "shared_mem_per_sm" => smem_sm,
                           "terms_per_sm" => terms_per_sm, "verdict" => verdict)
 @printf("  sieve workspace at m=32: %.1f KB\n", ws_bytes / 1024)
-@printf("  shared memory / LDS per CU: %.1f KB\n", smem_sm / 1024)
-@printf("  concurrent terms per CU: %d  -> %s\n", terms_per_sm, uppercase(verdict))
+@printf("  shared memory per SM:    %.1f KB\n", smem_sm / 1024)
+@printf("  concurrent terms per SM: %d  -> %s\n", terms_per_sm, uppercase(verdict))
 
 # ---------------------------------------------------------------------------------------------
 out = joinpath(@__DIR__, "gpu-validation.json")
@@ -373,8 +321,7 @@ open(io -> JSON.print(io, RESULTS, 2), out, "w")
 
 section("Summary — paste this back")
 println("""
-Device / arch / VRAM / driver: $(env["device"]) / $(env["capability"]) / $(env["vram_total_GB"]) GB / $(env["driver"])
-Vendor / wavefront / fp64   : $(env["vendor"]) / $(env["wavefront_size"]) / $(env["fp64_fp32_ratio_hint"])
+Device / CC / VRAM / driver : $(env["device"]) / $(env["capability"]) / $(env["vram_total_GB"]) GB / $(env["driver"])
 B1-B8 correctness           : $(allb ? "PASS" : "FAIL")
 C1 crossover N              : $(something(crossover, "none in range"))
 C2 best batched speedup     : $(round(best_batched, digits = 2))x
@@ -382,6 +329,6 @@ C3 f32 speedup              : $(join(["$k:$(round(v["f32_speedup"], digits=2))x"
 C4 break-even calls         : $(join(["$k:$(v["break_even_calls"] < 0 ? "never" : string(v["break_even_calls"]))" for (k, v) in sort(collect(c4), by = first)], " "))
 C5 per-launch overhead      : $(round(launch_us, digits = 1)) us
 D  max B (f32)              : $(join(["$k:$(v["max_B_f32"])" for (k, v) in sort(collect(d), by = first)], " "))
-E  terms per CU -> sieve      : $terms_per_sm -> $verdict
+E  terms/SM -> sieve verdict: $terms_per_sm -> $verdict
 
 Full results: $out""")

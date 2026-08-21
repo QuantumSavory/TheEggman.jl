@@ -61,14 +61,13 @@ Both entry points take batches, which on a GPU is what makes the port worthwhile
 ```julia
 hafnian(As)                                        # a vector of equally-sized matrices
 hafnian_repeated(A, rpts)                          # one matrix, many repetition patterns
-hafnian(As; backend = ROCBackend())                 # ...on a GPU (AMDGPU; CUDA works too)
+hafnian(As; backend = CUDABackend())               # ...on a GPU
 ```
 
-Loading `KernelAbstractions` (with a backend package such as AMDGPU.jl or CUDA.jl) enables
-`backend`, which runs the subset DP on the device; every other strategy falls back to the CPU.
-Results are bit-identical to the CPU path. Passing `ComplexF32` matrices halves the memory traffic
-for about seven digits of accuracy — worthwhile on cards where `Float64` runs at a fraction of
-`Float32` rate, which includes all RDNA consumer parts.
+Loading `KernelAbstractions` (with a backend package such as CUDA.jl) enables `backend`, which runs
+the subset DP on the device; every other strategy falls back to the CPU. Results are bit-identical
+to the CPU path. Passing `ComplexF32` matrices halves the memory traffic for about seven digits of
+accuracy — worthwhile on consumer cards, where `Float64` runs at a fraction of `Float32` rate.
 
 `TheEggman.gpu_cache_bytes()`, `TheEggman.empty_gpu_cache!()` and `TheEggman.dp_batch_bytes` manage
 the device-side plan cache and batch sizing.
