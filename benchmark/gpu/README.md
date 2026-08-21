@@ -18,14 +18,28 @@ EGGMAN_GPU_DRYRUN=1 julia --project=benchmark/gpu -t auto benchmark/gpu/run_gpu_
 ```
 
 runs every stage against KernelAbstractions' `CPU()` backend with stubbed device queries (and skips
-loading CUDA entirely). The timings are then meaningless, but it proves the script itself works.
-This is how it was developed, since the development machine has no GPU.
+loading any vendor package). The timings are then meaningless, but it proves the script itself
+works. This is how it was developed, since the development machine has no GPU.
+
+## Vendor
+
+AMD by default, via `AMDGPU.jl` and `ROCBackend()`. `EGGMAN_GPU_VENDOR=cuda` switches to NVIDIA,
+which also needs CUDA added to this project — it is deliberately not a dependency, so an AMD machine
+never downloads CUDA artifacts:
+
+```sh
+julia --project=benchmark/gpu -e 'using Pkg; Pkg.add("CUDA")'
+EGGMAN_GPU_VENDOR=cuda julia --project=benchmark/gpu benchmark/gpu/run_gpu_validation.jl
+```
+
+Everything vendor-specific lives in one clearly-marked block of six small functions near the top of
+the script.
 
 ## Stages
 
 | stage | what it establishes |
 |---|---|
-| **A** environment | device, compute capability, VRAM, and the fp64:fp32 ratio — every later number is meaningless without these |
+| **A** environment | device, GCN architecture, wavefront size, VRAM, and the fp64:fp32 ratio — every later number is meaningless without these |
 | **B** correctness | eight checks that must all pass before any timing is worth reading |
 | **C** performance | crossover `N`, batched throughput, fp32 gain, plan-upload amortisation, per-launch overhead |
 | **D** memory | plan cache size and the largest batch that fits |
@@ -43,9 +57,12 @@ instance cannot amortise. That is what **C2** is for: batching pays those launch
 whole batch, which is where the port should earn its keep.
 
 **C3 near 1.0× would be informative, not disappointing.** It would mean the kernel is bandwidth-bound
-rather than limited by fp64 throughput — worth knowing on a consumer card, where fp64 runs at
-1/32–1/64 rate.
+rather than limited by fp64 throughput. On AMD this cuts hard by product line rather than
+generation: CDNA compute parts (MI100/MI200/MI300, `gfx908`/`gfx90a`/`gfx94x`) run fp64 at roughly
+half to full fp32 rate, so `ComplexF64` costs little; RDNA consumer parts (`gfx10xx`–`gfx12xx`) run
+it at ~1/32, where `ComplexF32` is the better default. Stage A prints which one you have.
 
-**E is a go/no-go input, not a result.** A sieve term needs roughly a 40 KB workspace at `m = 32`.
-If fewer than two terms fit per SM, a sieve port would have too little occupancy to repay its
-barrier-heavy, pivoting-dependent reduction, and should not be attempted.
+**E is a go/no-go input, not a result.** A sieve term needs roughly a 40 KB workspace at `m = 32`,
+against LDS per compute unit — 64 KB on GCN/CDNA, 128 KB per WGP on RDNA3. If fewer than two terms
+fit per CU, a sieve port would have too little occupancy to repay its barrier-heavy,
+pivoting-dependent reduction, and should not be attempted.

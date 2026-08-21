@@ -1,7 +1,8 @@
 """
 GPU evaluation of TheEggman's subset DP, via KernelAbstractions.
 
-Loading `KernelAbstractions` (together with a backend package such as CUDA.jl) supplies the method
+Loading `KernelAbstractions` (together with a backend package such as AMDGPU.jl or CUDA.jl)
+supplies the method
 behind `TheEggman._haf_dp_backend`, which the `backend` keyword on [`hafnian`](@ref) and
 [`hafnian_repeated`](@ref) routes to.
 
@@ -12,8 +13,8 @@ multiply, with thread scaling stalling near 4× — which is exactly the shape a
 
 # Why the batch axis comes first
 
-`P` and `H` are stored `B × ·`, so the instance index is fastest-varying. A warp then covers 32
-consecutive instances of the *same* subproblem: the transition it follows is one value broadcast
+`P` and `H` are stored `B × ·`, so the instance index is fastest-varying. A wavefront then covers 32
+or 64 consecutive instances of the *same* subproblem: the transition it follows is one value broadcast
 across the warp, and the reads it makes from `P` and `H` are contiguous. Laying the arrays out the
 other way would scatter every one of them. Batching is therefore what makes the port worth doing,
 not merely a convenience — and it also amortises the `K/2` kernel launches each call needs across
