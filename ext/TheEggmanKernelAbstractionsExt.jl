@@ -44,8 +44,11 @@ end
 # One level of the DP. Every state in a level is independent and reads only levels at least two
 # below, so `H` is safely read and written in the same launch — it must NOT be marked `@Const`.
 #
-# Each state's sum is accumulated by a single thread in plan order, which is the same order the CPU
-# uses, so results are bit-identical rather than merely close.
+# Each state's sum is accumulated by a single thread in plan order — the same order the CPU uses —
+# so nothing is reordered. Results are still not bit-identical to the CPU: device compilers contract
+# `a*b + c` into a single-rounding FMA, which shifts the last ulp. Measured against an extended
+# precision reference the contracted result is the *more* accurate of the two, and the gap runs
+# ~1e-16 to 2e-15 relative. Compare across backends with a tolerance, never with `===`.
 @kernel function _dp_level_kernel!(H, @Const(P), @Const(starts), @Const(trans), lo, bits, mask)
     b, i = @index(Global, NTuple)      # b: instance (fastest), i: state within the level
     s = lo + i - 1

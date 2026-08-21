@@ -150,8 +150,12 @@ follows a single broadcast transition; the other layout would scatter every acce
 amortises the `N/2` kernel launches each call needs across the whole batch instead of paying them
 per hafnian, which is what makes moderate `N` worth sending to a GPU at all.
 
-Results are **bit-identical** to the CPU, not merely close: each state is summed by one thread in
-plan order, the same order the CPU uses.
+Nothing is reordered — each state is summed by one thread in plan order, the same order the CPU
+uses — but results are **not** bit-identical to the CPU, because device compilers contract
+`a*b + c` into a single-rounding FMA. The gap runs ~1e-16 to 2e-15 relative, and against an extended
+precision reference the GPU's contracted result is the *more* accurate of the two. Compare across
+backends with a tolerance; within one backend, repeated and batched evaluation is exactly
+reproducible.
 
 `ComplexF32` needs no separate API — pass a `ComplexF32` matrix. It costs about seven digits and,
 because the DP never cancels, that error stays near fp32 epsilon instead of growing with `N`
@@ -162,6 +166,21 @@ Plans are uploaded once per degree and cached; `TheEggman.gpu_cache_bytes()` rep
 hold and `TheEggman.empty_gpu_cache!()` releases it. Batches are not chunked automatically, since
 KernelAbstractions exposes no portable free-memory query — use `TheEggman.dp_batch_bytes(N, T, B)`
 to size one, and pass `max_batch` if it will not fit.
+
+Measured on an RTX 4080 SUPER (16 GB, compute 8.9, fp64 at 1/64 rate), against a **single-threaded**
+CPU baseline — a fully threaded CPU would close some of these gaps, since the CPU DP scales about 4×:
+
+| N | single call | best batched | at |
+|---|---|---|---|
+| 20 | 0.13× | 4.2× | B=256 |
+| 24 | 0.71× | 16.2× | B=256 |
+| 28 | 1.75× | **49.2×** | B=64 |
+| 32 | 1.67× | 26.8× | B=8 |
+
+Single calls only pay off from N≈26; batching is what makes the port worthwhile, exactly as the
+layout is designed for. `ComplexF32` adds a further 1.3×–5.0× (growing with N) on this card, where
+fp64 runs at 1/64 rate. Throughput does *not* rise monotonically with batch size — N=28 peaked at
+B=64 and fell ~2.8× by B=256 — so `max_batch` is worth tuning; the validation script sweeps it.
 
 See [`benchmark/gpu/README.md`](benchmark/gpu/README.md) for the validation script, which also runs
 without a GPU in a dry-run mode.

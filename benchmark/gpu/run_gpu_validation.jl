@@ -101,6 +101,11 @@ for k in sort(collect(keys(env)))
     @printf("  %-26s %s\n", k, env[k])
 end
 DRYRUN && @warn "DRY RUN: CPU backend with stubbed device queries. Timings are not GPU numbers."
+if Threads.nthreads() == 1
+    @warn """Julia has ONE thread, so every CPU baseline below is single-threaded and every GPU
+             speedup in stages C1/C2 is overstated — the CPU DP scales about 4x across cores.
+             Re-run with `-t auto` (or JULIA_NUM_THREADS) for a fair comparison."""
+end
 
 const BE = backend()
 
@@ -110,33 +115,39 @@ section("B. Correctness — all must pass")
 bres = Dict{String,Any}()
 rng = MersenneTwister(20260810)
 
-# B1: bit-identical to the CPU DP. Each state is summed by one thread in plan order, matching the
-# CPU exactly, so this is `===`. A failure means the kernel reordered a sum.
+# B1: agreement with the CPU DP. Nothing in the kernel reorders a sum, but device compilers contract
+# `a*b + c` into a single-rounding FMA, which moves the last ulp — so this is a tolerance, not `===`.
+# The threshold sits far above that FP noise and far below anything a real bug would hide under.
+const B1_RTOL = 1e-12
 b1 = Dict{String,Any}()
 b1ok = true
 for N in (QUICK ? (14, 20) : (14, 16, 20, 24, 28, 32))
     A = randsym(rng, ComplexF64, N)
     g = hafnian(A; backend = BE)
     c = hafnian(A; method = :dp, nthreads = 1)
-    ok = g === c
+    rel = abs(g - c) / abs(c)
+    ok = rel < B1_RTOL
     global b1ok &= ok
-    b1["N=$N"] = Dict("identical" => ok, "rel_diff" => ok ? 0.0 : abs(g - c) / abs(c))
-    @printf("  B1 N=%-3d bit-identical: %-6s%s\n", N, ok,
-            ok ? "" : @sprintf("  (rel diff %.3e)", abs(g - c) / abs(c)))
+    b1["N=$N"] = Dict("ok" => ok, "rel_diff" => rel, "exact" => g === c)
+    @printf("  B1 N=%-3d agrees (rel %.3e): %-6s%s\n", N, rel, ok,
+            g === c ? "  [exact]" : "")
     flush(stdout)
 end
-bres["B1_bit_identical"] = b1
+bres["B1_agrees_with_cpu"] = b1
 
 As = [randsym(rng, ComplexF64, 20) for _ in 1:16]
-ref = [hafnian(A; method = :dp, nthreads = 1) for A in As]
 
-b2 = all(hafnian(As; backend = BE) .=== ref)
-bres["B2_batched_eq_scalar"] = b2
-println("  B2 batched === scalar loop: ", b2)
+# B2: within one backend, batching must not change how any sum is evaluated. This one IS exact.
+b2 = all(hafnian(As; backend = BE) .=== [hafnian(A; backend = BE) for A in As])
+bres["B2_batched_eq_scalar_same_backend"] = b2
+println("  B2 batched === scalar, same backend: ", b2)
 
-b3 = all(hafnian(As; backend = BE) .=== hafnian(As; backend = CPU()))
-bres["B3_backend_agreement"] = b3
-println("  B3 device === KA CPU backend: ", b3)
+# B3: across backends, tolerance again — the CPU backend need not contract the same way.
+b3rel = maximum(abs.(hafnian(As; backend = BE) .- hafnian(As; backend = CPU())) ./
+                abs.(hafnian(As; backend = CPU())))
+b3 = b3rel < B1_RTOL
+bres["B3_backend_agreement"] = Dict("ok" => b3, "max_rel_diff" => b3rel)
+@printf("  B3 device vs KA CPU backend (max rel %.3e): %s\n", b3rel, b3)
 
 # B4: ComplexF32 should stay near fp32 epsilon; the DP never cancels, so it must not drift with N.
 b4 = Dict{String,Any}(); b4ok = true
@@ -227,6 +238,38 @@ for N in (QUICK ? (20,) : (20, 24, 28, 32)), Bsz in (1, 8, 64, 256)
     flush(stdout)
 end
 RESULTS["C2_batched"] = c2
+
+# C2b — chunk sweep. C2 showed throughput can *fall* as the batch grows (N=28 peaked at B=64 and
+# dropped by ~2.8x at B=256). `max_batch` splits a batch into chunks without changing the answer, so
+# sweeping it on one large batch separates the two candidate causes: if a smaller chunk recovers the
+# peak, the cost is per-chunk (allocation churn, or a working set that has outgrown the cache); if it
+# does not, the cost is elsewhere. Whatever wins here is the value to pass in production.
+println("\nC2b chunk sweep at a fixed large batch — finds the best max_batch")
+@printf("  %-5s %-7s %-11s %-14s %s\n", "N", "B", "max_batch", "GPU (haf/s)", "vs unchunked")
+c2b = Dict{String,Any}()
+for N in (QUICK ? (24,) : (24, 28))
+    Bsz = 256
+    TheEggman.dp_batch_bytes(N, ComplexF64, Bsz) > 0.4 * avail_mem() && continue
+    Ab = [randsym(MersenneTwister(N * 7 + b), ComplexF64, N) for b in 1:Bsz]
+    reps = N >= 28 ? 2 : 4
+    base = timed(() -> hafnian(Ab; backend = BE), reps)
+    best_mb, best_t = nothing, base
+    for mb in (16, 32, 64, 128, 256)
+        mb > Bsz && continue
+        t = timed(() -> hafnian(Ab; backend = BE, max_batch = mb), reps)
+        c2b["N=$N,max_batch=$mb"] = Dict("gpu_ms" => t, "haf_per_s" => 1000Bsz / t,
+                                         "vs_unchunked" => base / t)
+        if t < best_t
+            best_mb, best_t = mb, t
+        end
+        @printf("  %-5d %-7d %-11d %-14.1f %.2fx\n", N, Bsz, mb, 1000Bsz / t, base / t)
+        flush(stdout)
+    end
+    c2b["N=$N,best"] = Dict("max_batch" => something(best_mb, Bsz), "speedup" => base / best_t)
+    @printf("  -> N=%d best max_batch: %s (%.2fx over unchunked)\n",
+            N, something(best_mb, "unchunked"), base / best_t)
+end
+RESULTS["C2b_chunk_sweep"] = c2b
 
 # C3 — precision. A ratio near 1 means the kernel is bandwidth-bound rather than fp64-throughput
 # bound, which is itself worth knowing on a consumer card.
@@ -325,6 +368,7 @@ Device / CC / VRAM / driver : $(env["device"]) / $(env["capability"]) / $(env["v
 B1-B8 correctness           : $(allb ? "PASS" : "FAIL")
 C1 crossover N              : $(something(crossover, "none in range"))
 C2 best batched speedup     : $(round(best_batched, digits = 2))x
+C2b best max_batch          : $(join(["$k=$(v["max_batch"]) ($(round(v["speedup"], digits=2))x)" for (k, v) in sort(collect(c2b), by = first) if endswith(k, "best")], " "))
 C3 f32 speedup              : $(join(["$k:$(round(v["f32_speedup"], digits=2))x" for (k, v) in sort(collect(c3), by = first)], " "))
 C4 break-even calls         : $(join(["$k:$(v["break_even_calls"] < 0 ? "never" : string(v["break_even_calls"]))" for (k, v) in sort(collect(c4), by = first)], " "))
 C5 per-launch overhead      : $(round(launch_us, digits = 1)) us

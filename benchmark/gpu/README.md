@@ -33,10 +33,15 @@ This is how it was developed, since the development machine has no GPU.
 
 ## What the results mean
 
-**B1 is the one to watch.** GPU output should be **bit-identical** (`===`) to the CPU DP, not merely
-close: each state is summed by a single thread in plan order, exactly the order the CPU uses. A
-failure there means the kernel reordered a sum, which is a structural bug rather than a tolerance
-question — the script reports the relative gap so it can be diagnosed.
+**B1 checks agreement with the CPU DP to a tight tolerance, not exactly.** Nothing in the kernel
+reorders a sum — each state is accumulated by one thread in plan order — but device compilers
+contract `a*b + c` into a single-rounding FMA, which moves the last ulp. Measured, that leaves a
+~1e-16 to 2e-15 relative gap, and the contracted result is the *more* accurate one. The threshold is
+1e-12: far above the FP noise, far below anything a real bug would hide under.
+
+The exactness that does hold is *within* a backend: B2 (batched versus scalar), B6 (determinism) and
+B7 (chunking invariance) all use `===`, because none of them changes how any single sum is
+evaluated. A failure in one of those is a structural bug.
 
 **C1 is expected to lose at small N.** A call needs roughly `N/2` kernel launches, a floor a single
 instance cannot amortise. That is what **C2** is for: batching pays those launches once for the

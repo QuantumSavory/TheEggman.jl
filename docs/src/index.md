@@ -65,8 +65,10 @@ hafnian(As; backend = CUDABackend())               # ...on a GPU
 ```
 
 Loading `KernelAbstractions` (with a backend package such as CUDA.jl) enables `backend`, which runs
-the subset DP on the device; every other strategy falls back to the CPU. Results are bit-identical
-to the CPU path. Passing `ComplexF32` matrices halves the memory traffic for about seven digits of
+the subset DP on the device; every other strategy falls back to the CPU. Device results differ from
+the CPU in the last ulp or two (device compilers fuse multiply-add, which is slightly *more*
+accurate), so compare across backends with a tolerance; within one backend results are exactly
+reproducible. Passing `ComplexF32` matrices halves the memory traffic for about seven digits of
 accuracy — worthwhile on consumer cards, where `Float64` runs at a fraction of `Float32` rate.
 
 `TheEggman.gpu_cache_bytes()`, `TheEggman.empty_gpu_cache!()` and `TheEggman.dp_batch_bytes` manage
