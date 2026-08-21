@@ -44,8 +44,9 @@ at these sizes once repeated-call GC is counted.
 **`:dp` — degrees up to `TheEggman.DP_MAX` (32).** The same recursion, evaluated at runtime over
 memoised subsets. Because it always pairs off the *smallest* remaining index, the subsets it reaches
 are constrained to `F(K+1)` of them — a Fibonacci number, so the state space grows like `φ^K ≈
-1.618^K`, not `2^K`. That is worse asymptotically than the sieve's `1.414^K K³` (they cross around
-`K ≈ 105`) but across the whole computable range the sieve does 65–100× more arithmetic:
+1.618^K`, not `2^K`, and the transition count like `K φ^K`. That is worse asymptotically than the
+sieve's `K³ 1.414^K` — their exact counts cross at `K ≈ 62` — but across the whole computable range
+the sieve does 65–100× more arithmetic:
 
 | K              | 12   | 16    | 20    | 24     | 28      | 32       |
 |----------------|------|-------|-------|--------|---------|----------|

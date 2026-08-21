@@ -26,9 +26,10 @@ minimum plus one partner (so `r` cannot exceed twice the number of minima availa
 Counting those gives `F(K+1)` subsets including the empty one, a Fibonacci number: the state space
 grows like `φ^K ≈ 1.618^K`, not `2^K`.
 
-That is *worse* asymptotically than the sieve's `2^{K/2} K³ ≈ 1.414^K K³` — the two cross only
-around `K ≈ 105` — but across the entire range that is actually computable, the sieve does 65–100×
-more arithmetic:
+Transitions are `Θ(K φ^K)`: `Θ(φ^K)` states, each with `O(K)` of them. That is *worse*
+asymptotically than the sieve's `Θ(K³ 2^{K/2}) = Θ(K³ 1.414^K)` — their exact counts cross at
+`K ≈ 62` — but across the entire range that is actually computable, the sieve does 65–100× more
+arithmetic:
 
 | K              | 12  | 16   | 20    | 24     | 28      | 32       |
 |----------------|-----|------|-------|--------|---------|----------|
