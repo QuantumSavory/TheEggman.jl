@@ -42,7 +42,7 @@ if DRYRUN
 else
     backend() = CUDA.CUDABackend()
     devsync() = CUDA.synchronize()
-    avail_mem() = CUDA.available_memory()
+    avail_mem() = CUDA.free_memory()
     reclaim!() = CUDA.reclaim()
     functional() = CUDA.functional()
     smem_per_sm() =
@@ -59,7 +59,7 @@ else
             "device" => CUDA.name(dev), "capability" => string(cap),
             "fp64_fp32_ratio_hint" => hint,
             "vram_total_GB" => round(CUDA.totalmem(dev) / 2^30, digits = 2),
-            "vram_free_GB" => round(CUDA.available_memory() / 2^30, digits = 2),
+            "vram_free_GB" => round(CUDA.free_memory() / 2^30, digits = 2),
             "multiprocessors" => CUDA.attribute(dev, CUDA.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT),
             "shared_mem_per_block_KB" =>
                 CUDA.attribute(dev, CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK) ÷ 1024,
