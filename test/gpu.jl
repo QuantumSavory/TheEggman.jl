@@ -129,6 +129,23 @@ using KernelAbstractions
         @test (@inferred hafnian_repeated(A, rpts; backend = be)) isa Vector{ComplexF64}
     end
 
+    @testset "no views in host<->device transfers" begin
+        # A source lint, not a behavioural test, and deliberately so: the CPU backend allocates
+        # plain `Array`s, so it cannot reproduce device dispatch at all. The bug this guards
+        # against only appears on a real GPU — `copyto!` with a view on either side misses the
+        # host<->device methods, falls through to Base's generic implementation, and scalar-indexes
+        # the device array ("Scalar indexing is disallowed"). Every transfer must therefore use the
+        # five-argument `copyto!(dest, doffs, src, soffs, n)` form on plain arrays.
+        src = read(joinpath(pkgdir(TheEggman), "ext", "TheEggmanKernelAbstractionsExt.jl"), String)
+        body = split(src, "function TheEggman._haf_dp_backend")[end]
+        for line in split(body, '\n')
+            code = first(split(line, '#'))          # ignore the comment that explains this rule
+            if occursin("copyto!", code) || occursin("fill!", code)
+                @test !occursin("view(", code)
+            end
+        end
+    end
+
     @testset "dp_batch_bytes accounting" begin
         nstates, _ = TheEggman._dp_counts(20)
         npairs = 20 * 19 ÷ 2

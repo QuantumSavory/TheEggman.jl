@@ -103,7 +103,16 @@ function TheEggman._haf_dp_backend(
     out = Vector{T}(undef, B)
     chunk = max_batch === nothing ? B : max(1, min(B, max_batch))
     kernel = _dp_level_kernel!(backend)
-    host = Vector{T}(undef, min(chunk, B))
+
+    # Host staging buffers. Every host<->device transfer below uses the five-argument
+    # `copyto!(dest, doffs, src, soffs, n)` on *plain* arrays, never a view on either side. Only
+    # that form has host<->device methods: handing `copyto!` a host `SubArray` destination falls
+    # through to Base's generic implementation, which scalar-indexes the device array and throws
+    # "Scalar indexing is disallowed". A view of a device array can hit the same fallback. The
+    # buffers below exist so no view is ever needed — do not "simplify" them away.
+    hostP = Vector{T}(undef, chunk * npairs)
+    hostH = Vector{T}(undef, chunk)
+    ones_host = fill(one(T), chunk)
 
     # The scratch buffers are shared, so one call at a time per backend. Device work serialises
     # anyway, and this keeps concurrent callers from writing over each other's state array.
@@ -114,8 +123,12 @@ function TheEggman._haf_dp_backend(
             sc = _scratch(backend, T, nb * nstates, nb * npairs)
             Hd, Pd = sc.H, sc.P
 
-            copyto!(view(Pd, 1:nb*npairs), vec(P[first_b:last_b, :]))
-            fill!(view(Hd, 1:nb), one(T))      # the empty set, one entry per instance
+            # Gather this chunk's pairs into the flat instance-fastest layout the kernel expects.
+            @inbounds for q in 1:npairs, b in 1:nb
+                hostP[(q-1)*nb+b] = P[first_b+b-1, q]
+            end
+            copyto!(Pd, 1, hostP, 1, nb * npairs)
+            copyto!(Hd, 1, ones_host, 1, nb)   # the empty set, one entry per instance
 
             for L in 2:length(levels)-1
                 lo = Int(levels[L])
@@ -125,8 +138,8 @@ function TheEggman._haf_dp_backend(
             end
             KA.synchronize(backend)
 
-            copyto!(view(host, 1:nb), view(Hd, (nstates-1)*nb+1:nstates*nb))
-            copyto!(view(out, first_b:last_b), view(host, 1:nb))
+            copyto!(hostH, 1, Hd, (nstates - 1) * nb + 1, nb)
+            copyto!(out, first_b, hostH, 1, nb)
         end
     end
     return out

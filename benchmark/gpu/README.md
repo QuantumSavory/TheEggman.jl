@@ -21,6 +21,17 @@ runs every stage against KernelAbstractions' `CPU()` backend with stubbed device
 loading CUDA entirely). The timings are then meaningless, but it proves the script itself works.
 This is how it was developed, since the development machine has no GPU.
 
+**What the dry run cannot catch.** The CPU backend allocates plain `Array`s, so it exercises kernel
+logic, batching, chunking and the plan cache — but not device dispatch. Two classes of bug are
+invisible to it and have both actually occurred:
+
+- *Transfers.* `copyto!` with a view on either side misses the host↔device methods, falls through to
+  Base's generic implementation and scalar-indexes the device array. All transfers therefore use the
+  five-argument `copyto!(dest, doffs, src, soffs, n)` form on plain arrays; `test/gpu.jl` lints for
+  this, since no CPU test can.
+- *Arithmetic.* Device compilers fuse multiply-add, so results differ from the CPU in the last ulp.
+  Compare across backends with a tolerance.
+
 ## Stages
 
 | stage | what it establishes |
