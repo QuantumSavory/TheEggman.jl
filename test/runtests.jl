@@ -379,6 +379,12 @@ end
             @test TheEggman._steer_backend(
                 TheEggman._choose_method_distinct(N, N ÷ 2, nt).method, :a_backend, N, :auto) === :dp
         end
+        # ...but never at the expense of the unrolled kernel, which beats any launch outright.
+        for nt in (1, 12, 32), N in 2:2:TheEggman.UNROLL_MAX
+            @test TheEggman._steer_backend(
+                TheEggman._choose_method_distinct(N, N ÷ 2, nt).method, :a_backend, N, :auto) ===
+                  :unrolled
+        end
         # Beyond what the DP covers the choice stands, but the caller is told.
         @test (@test_logs (:warn,) TheEggman._steer_backend(:sieve, :a_backend, 36, :auto)) === :sieve
         # No backend, no warning and no steering.

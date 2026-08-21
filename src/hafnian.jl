@@ -998,6 +998,9 @@ speedups with sieve-level accuracy. Silence turned a one-line policy gap into a 
 """
 function _steer_backend(chosen::Symbol, backend, K::Int, method::Symbol)
     backend === nothing && return chosen
+    # Never override the unrolled kernel. It finishes in tens of nanoseconds, against ~21 µs for a
+    # single kernel launch, so sending those degrees to a device is a three-order-of-magnitude loss.
+    chosen === :unrolled && return chosen
     method === :auto && K <= DP_MAX && return :dp
     if chosen !== :dp
         @warn "`backend` was given but the $(chosen === :unrolled ? "unrolled kernel" : "sieve") " *

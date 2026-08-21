@@ -534,6 +534,11 @@ _haf_dp_backend(backend, P, plan; kwargs...) = throw(ArgumentError(
 # (backend, degree, layout). The cache lives here rather than in the extension so that its lifecycle
 # is inspectable without a GPU loaded, and so the extension adds methods rather than overwriting any.
 const _DEVICE_PLANS = Dict{Any,Any}()
+
+# Reusable device work buffers, keyed by (backend, element type) and grown on demand. Allocating the
+# state array afresh on every call showed up as ~21 µs of fixed cost per call, which dominates every
+# small batch; reusing it also removes the allocator churn that made large batches regress.
+const _DEVICE_SCRATCH = Dict{Any,Any}()
 const _DEVICE_PLAN_LOCK = ReentrantLock()
 
 """
@@ -547,7 +552,7 @@ Plans are never evicted — they are pure functions of the degree and expensive 
 function gpu_cache_bytes()
     lock(_DEVICE_PLAN_LOCK) do
         total = 0
-        for (_, dev) in _DEVICE_PLANS, arr in dev
+        for cache in (_DEVICE_PLANS, _DEVICE_SCRATCH), (_, dev) in cache, arr in dev
             total += length(arr) * sizeof(eltype(arr))
         end
         return total
@@ -562,6 +567,7 @@ Drop every cached device plan, releasing its memory. Later calls re-upload on de
 function empty_gpu_cache!()
     lock(_DEVICE_PLAN_LOCK) do
         empty!(_DEVICE_PLANS)
+        empty!(_DEVICE_SCRATCH)
     end
     return nothing
 end

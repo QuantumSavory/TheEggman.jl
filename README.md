@@ -162,26 +162,35 @@ because the DP never cancels, that error stays near fp32 epsilon instead of grow
 (measured 2–5e-7 across N=12–24, flat). On consumer cards, where fp64 runs at 1/32–1/64 rate, this
 is usually the right default.
 
-Plans are uploaded once per degree and cached; `TheEggman.gpu_cache_bytes()` reports the VRAM they
-hold and `TheEggman.empty_gpu_cache!()` releases it. Batches are not chunked automatically, since
-KernelAbstractions exposes no portable free-memory query — use `TheEggman.dp_batch_bytes(N, T, B)`
-to size one, and pass `max_batch` if it will not fit.
+Plans are uploaded once per degree and cached, and the device work buffers are reused across calls
+rather than reallocated — per-call allocation cost ~21 µs of fixed overhead, which dominates small
+batches, and its allocator churn made the scalar path 19× slower than an identical batch of one.
+`TheEggman.gpu_cache_bytes()` reports the VRAM plans and buffers hold; `TheEggman.empty_gpu_cache!()`
+releases it. Because the buffers are shared, one call at a time runs per backend; device work
+serialises anyway. Batches are not chunked automatically, since KernelAbstractions exposes no
+portable free-memory query — use `TheEggman.dp_batch_bytes(N, T, B)` to size one, and pass
+`max_batch` if it will not fit.
 
-Measured on an RTX 4080 SUPER (16 GB, compute 8.9, fp64 at 1/64 rate). **These are against a
-single-threaded CPU baseline and are not a fair comparison** — the CPU DP scales about 4× across
-cores, so divide accordingly until a multi-threaded run replaces them:
+Measured on an RTX 4080 SUPER (16 GB, compute 8.9, fp64 at 1/64 rate) against a 32-thread CPU
+baseline, `ComplexF64`. Batched figures at `B ≥ 64`, where the CPU side is also fully parallel:
 
-| N | single call | best batched | at |
+| N | single call | batched B=64 | batched B=256 |
 |---|---|---|---|
-| 20 | 0.13× | 4.2× | B=256 |
-| 24 | 0.71× | 16.2× | B=256 |
-| 28 | 1.75× | **49.2×** | B=64 |
-| 32 | 1.67× | 26.8× | B=8 |
+| 20 | 0.10× | 0.54× | 0.68× |
+| 24 | 0.28× | 0.58× | 4.75× |
+| 28 | 0.92× | **16.5×** | 6.4× |
+| 32 | 0.51× | **6.9×** | — |
 
-Single calls only pay off from N≈26; batching is what makes the port worthwhile, exactly as the
-layout is designed for. `ComplexF32` adds a further 1.3×–5.0× (growing with N) on this card, where
-fp64 runs at 1/64 rate. Throughput does *not* rise monotonically with batch size — N=28 peaked at
-B=64 and fell ~2.8× by B=256 — so `max_batch` is worth tuning; the validation script sweeps it.
+**Use a GPU from about `N = 26` and only for batched work.** Below that the CPU wins outright — the
+DP threads well and a single call cannot amortise the per-level kernel launches. A single hafnian
+never wins at any size in this sweep.
+
+`ComplexF32` is worth taking on a consumer card: a further **2.3× at N=20, 3.8× at N=24, 4.9× at
+N=28**, for about seven digits, and because the DP never cancels that error stays near fp32 epsilon
+instead of growing with `N`. Pass `ComplexF32.(A)`.
+
+Plan upload amortises after 3–14 calls at the same degree. Throughput is not monotonic in batch
+size, so `max_batch` is worth sweeping for your `N`; the validation script does it.
 
 See [`benchmark/gpu/README.md`](benchmark/gpu/README.md) for the validation script, which also runs
 without a GPU in a dry-run mode.

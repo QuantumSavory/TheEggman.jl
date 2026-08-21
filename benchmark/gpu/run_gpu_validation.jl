@@ -196,6 +196,29 @@ println("\n  B overall: ", allb ? "PASS" : "FAIL — investigate before trusting
 # ---------------------------------------------------------------------------------------------
 section("C. Performance")
 
+# C0 — path consistency. `hafnian(A; backend)` and `hafnian([A]; backend)` do identical work, so they
+# must take the same time. They did not before device buffers were reused: an earlier run measured
+# 23.1 ms for the scalar path against 1.2 ms for the batch-of-one at N=32, which pointed at the
+# allocator being churned by per-call allocations rather than at anything algorithmic.
+println("\nC0 scalar vs batch-of-one — identical work, so the ratio should be ~1")
+@printf("  %-5s %-13s %-13s %s\n", "N", "scalar (ms)", "batch-1 (ms)", "ratio")
+c0 = Dict{String,Any}()
+c0worst = 1.0
+for N in (QUICK ? (24,) : (24, 28, 32))
+    A = randsym(MersenneTwister(N), ComplexF64, N)
+    reps = N >= 30 ? 3 : 10
+    ts = timed(() -> hafnian(A; backend = BE), reps)
+    tb = timed(() -> hafnian([A]; backend = BE), reps)
+    r = max(ts, tb) / min(ts, tb)
+    global c0worst = max(c0worst, r)
+    c0["N=$N"] = Dict("scalar_ms" => ts, "batch1_ms" => tb, "ratio" => r)
+    @printf("  %-5d %-13.3f %-13.3f %.2fx%s\n", N, ts, tb, r, r > 1.5 ? "  <-- INVESTIGATE" : "")
+    flush(stdout)
+end
+RESULTS["C0_path_consistency"] = c0
+c0worst > 1.5 && @warn "scalar and batch-of-one disagree by $(round(c0worst, digits=2))x; the two " *
+                       "paths do the same work, so one of them is paying an avoidable cost."
+
 # C1 — single instance. Expect the GPU to lose at small N: roughly K/2 kernel launches per call is a
 # floor that a single instance cannot amortise.
 println("\nC1 single-instance sweep (ComplexF64, B=1)")
@@ -319,8 +342,9 @@ nlevels = length(TheEggman._dp_plan(16, Int32).levels) - 2
 t16 = timed(() -> hafnian(A16; backend = BE), 50)
 launch_us = 1000 * t16 / nlevels
 RESULTS["C5_launch_overhead_us"] = launch_us
-@printf("\nC5 per-launch overhead: %.1f us  (N=16 call %.3f ms over %d level launches)\n",
-        launch_us, t16, nlevels)
+@printf("\nC5 fixed cost per call: %.3f ms at N=16 (%.1f us per level launch over %d launches)\n",
+        t16, launch_us, nlevels)
+println("     — an N=16 call is almost all fixed cost, so this bounds the launch + transfer floor.")
 
 # ---------------------------------------------------------------------------------------------
 section("D. Memory")
@@ -368,10 +392,11 @@ Device / CC / VRAM / driver : $(env["device"]) / $(env["capability"]) / $(env["v
 B1-B8 correctness           : $(allb ? "PASS" : "FAIL")
 C1 crossover N              : $(something(crossover, "none in range"))
 C2 best batched speedup     : $(round(best_batched, digits = 2))x
+C0 worst path ratio         : $(round(c0worst, digits = 2))x
 C2b best max_batch          : $(join(["$k=$(v["max_batch"]) ($(round(v["speedup"], digits=2))x)" for (k, v) in sort(collect(c2b), by = first) if endswith(k, "best")], " "))
 C3 f32 speedup              : $(join(["$k:$(round(v["f32_speedup"], digits=2))x" for (k, v) in sort(collect(c3), by = first)], " "))
 C4 break-even calls         : $(join(["$k:$(v["break_even_calls"] < 0 ? "never" : string(v["break_even_calls"]))" for (k, v) in sort(collect(c4), by = first)], " "))
-C5 per-launch overhead      : $(round(launch_us, digits = 1)) us
+C5 fixed cost/call (N=16)   : $(round(t16, digits = 3)) ms ($(round(launch_us, digits = 1)) us per launch)
 D  max B (f32)              : $(join(["$k:$(v["max_B_f32"])" for (k, v) in sort(collect(d), by = first)], " "))
 E  terms/SM -> sieve verdict: $terms_per_sm -> $verdict
 
