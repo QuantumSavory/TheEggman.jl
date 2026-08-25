@@ -4,7 +4,7 @@ CurrentModule = TheEggman
 
 # TheEggman
 
-Documentation for [TheEggman](https://github.com/JacobGunnell/TheEggman.jl), a Julia port of
+Documentation for [TheEggman](https://github.com/QuantumSavory/TheEggman.jl), a Julia port of
 [thewalrus](https://github.com/XanaduAI/thewalrus).
 
 ## Hafnians

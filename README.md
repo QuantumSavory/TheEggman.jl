@@ -1,6 +1,9 @@
 # TheEggman
 
-[![Build Status](https://github.com/JacobGunnell/TheEggman.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/JacobGunnell/TheEggman.jl/actions/workflows/CI.yml?query=branch%3Amain)
+[![Stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://QuantumSavory.github.io/TheEggman.jl/stable/)
+[![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://QuantumSavory.github.io/TheEggman.jl/dev/)
+[![Build Status](https://github.com/QuantumSavory/TheEggman.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/QuantumSavory/TheEggman.jl/actions/workflows/CI.yml?query=branch%3Amain)
+[![Coverage](https://codecov.io/gh/QuantumSavory/TheEggman.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/QuantumSavory/TheEggman.jl)
 
 A Julia port of [thewalrus](https://github.com/XanaduAI/thewalrus), Xanadu's library of matrix
 functions for Gaussian quantum optics.

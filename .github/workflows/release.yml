@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  register:
+    name: Register with Julia General Registry
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify dispatch is from main
+        if: github.ref != 'refs/heads/main'
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "::error::Releases must be dispatched from main, but this run is on '$REF'."
+          exit 1
+
+      - uses: actions/checkout@v7
+
+      - name: Comment @JuliaRegistrator register
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          # Extract text between the first two ## headings (skipping [Unreleased])
+          notes=$(sed -n '/^## \[[0-9]/,/^## \[/{/^## \[[0-9]/!{/^## \[/!p}}' CHANGELOG.md)
+          body=$(printf '@JuliaRegistrator register\n\nRelease notes:\n%s\n' "$notes")
+          echo "::group::Release notes"
+          printf '%s\n' "$body"
+          echo "::endgroup::"
+          gh api "repos/$REPO/commits/$SHA/comments" -f body="$body"
