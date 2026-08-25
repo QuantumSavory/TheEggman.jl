@@ -211,7 +211,7 @@ timestamped directory under `.benchmarks/`. See
 [`benchmark/competitors/README.md`](benchmark/competitors/README.md) for details and for how to run the
 stages individually.
 
-On a 12-thread i7-1365U, with mean ratios against TheEggman.jl tabulated under each panel:
+On a 32-thread Ryzen 9 9950X, with mean ratios against TheEggman.jl tabulated under each panel:
 
 ![Benchmarks comparing Hafnian performance of TheEggman.jl to thewalrus and piquasso.](assets/images/competitors_benchmark_comparison.svg)
 
